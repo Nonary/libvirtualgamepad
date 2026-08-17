@@ -1,0 +1,23 @@
+# Native build output
+/build/
+/out/
+/artifacts/
+
+# Visual Studio and WDK intermediates
+/.vs/
+/**/*.user
+/**/*.suo
+/**/*.VC.db
+/**/*.VC.opendb
+/**/*.pdb
+/**/*.idb
+/**/*.obj
+/**/*.tlog/
+/**/*.log
+/**/*.dll
+/**/*.cat
+
+# Local driver-signing material must never be committed.
+/certificates/
+*.pfx
+*.pvk

@@ -1,0 +1,108 @@
+; Copyright (c) 2026 Chase Payne
+; SPDX-License-Identifier: MIT
+;
+; Architecture template. The release packager substitutes $ARCH$ with amd64 or
+; arm64 and writes VibeshineVhfGamepad.inf beside the matching DLL. Do not ship
+; an INF that names more than one architecture while carrying one flat DLL.
+
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%Vibeshine%
+CatalogFile=VibeshineVhfGamepad.cat
+DriverVer=08/16/2026,0.1.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%Vibeshine%=Vibeshine,NT$ARCH$.10.0...17134,NT$ARCH$.10.0...22000
+
+[Vibeshine.NT$ARCH$.10.0...17134]
+%DeviceName%=VibeshineVhfGamepad_Install_Win10,ROOT\VIBESHINEVIRTUALGAMEPAD
+
+[Vibeshine.NT$ARCH$.10.0...22000]
+%DeviceName%=VibeshineVhfGamepad_Install_Win11,ROOT\VIBESHINEVIRTUALGAMEPAD
+
+; ====================== Windows 10 1803 through Windows 10 =====================
+
+[VibeshineVhfGamepad_Install_Win10.NT]
+CopyFiles=VibeshineVhfGamepad.CopyFiles
+
+[VibeshineVhfGamepad_Install_Win10.NT.HW]
+AddReg=VibeshineVhfGamepad_Install.AddReg
+
+[VibeshineVhfGamepad_Install_Win10.NT.Services]
+AddService=WUDFRd,0x000001fa,WUDFRd_ServiceInstall
+
+[VibeshineVhfGamepad_Install_Win10.NT.Wdf]
+UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
+UmdfServiceOrder=VibeshineVhfGamepad
+UmdfDispatcher=FileHandle
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[WUDFRd_ServiceInstall]
+DisplayName=%WUDFRdServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\WUDFRd.sys
+
+; ================================ Windows 11 ==================================
+
+[VibeshineVhfGamepad_Install_Win11.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=VibeshineVhfGamepad.CopyFiles
+
+[VibeshineVhfGamepad_Install_Win11.NT.HW]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=VibeshineVhfGamepad_Install.AddReg
+
+[VibeshineVhfGamepad_Install_Win11.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[VibeshineVhfGamepad_Install_Win11.NT.Wdf]
+UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
+UmdfServiceOrder=VibeshineVhfGamepad
+UmdfDispatcher=FileHandle
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+; ================================ Shared =======================================
+
+[VibeshineVhfGamepad_Install.AddReg]
+; hidvhf.inf instructs third-party VHF source drivers to name vhf directly.
+; WUDFRd is associated through this package's version-specific sections.
+HKR,,LowerFilters,0x00010000,"vhf"
+; This is a UMDF source device, so its stack security belongs in the INF.
+; Permit only the interactive user session to create virtual controllers;
+; SYSTEM and Administrators retain full access for installation and recovery.
+; UD is the Windows UMDF-host SID, required for the driver's local VHF target.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GA;;;UD)"
+
+[VibeshineVhfGamepad_Wdf]
+UmdfLibraryVersion=2.15
+ServiceBinary=%13%\VibeshineVhfGamepad.dll
+
+[VibeshineVhfGamepad.CopyFiles]
+VibeshineVhfGamepad.dll
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+VibeshineVhfGamepad.dll=1
+
+[Strings]
+Vibeshine="Vibeshine"
+DeviceName="Vibeshine Virtual Gamepad"
+WUDFRdServiceName="Windows Driver Foundation - User-mode Driver Framework Reflector"
+DiskName="Vibeshine Virtual Gamepad Driver"

@@ -1,0 +1,8 @@
+# Keep source and package templates deterministic across Windows release hosts.
+* text=auto eol=lf
+
+# Driver packages and local signing material are generated and ignored; should
+# a binary accidentally be staged, never text-normalize it.
+*.dll binary
+*.cat binary
+*.pfx binary

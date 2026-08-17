@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <catalog-file path="VibeshineVhfGamepad.cat">
+    <authenticode-sign />
+  </catalog-file>
+</artifact-configuration>
