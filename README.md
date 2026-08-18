@@ -72,6 +72,33 @@ the catalog hash. Vibeshine must consume a pinned signed package and must not
 deep-sign the catalog-bound DLL inside its MSI. Local test packages use a
 clearly separate local test certificate.
 
+For a local test build, `tools/build-driver.ps1` follows the same package model
+as Vibeshine's virtual-display driver: it builds the DLL, generates the final
+INF/catalog, creates or reuses `CN=Vibeshine VHF Gamepad Test` in
+`CurrentUser\My`, signs only the catalog, and exports the public certificate as
+`driver/VibeshineVhfGamepad.cer`. The private key never enters the package.
+Trust that public certificate explicitly on the test host before installation:
+
+```powershell
+.\tools\build-driver.ps1 -Platform x64
+.\tools\trust-test-certificate.ps1 -PackageDir .\artifacts\vhf-gamepad-x64-Release-<DriverVer>
+.\tools\verify-driver-package.ps1 -PackageDir .\artifacts\vhf-gamepad-x64-Release-<DriverVer> -Platform x64 -DriverVer <DriverVer> -SourceRevision <git-sha>
+```
+
+On a clean Git worktree, the build script derives `DriverVer` from the latest
+commit date and revision count. While iterating on uncommitted source, pass an
+explicit monotonic newer `-DriverVer` so Windows cannot select an older staged
+driver package.
+
+The trust command must run elevated and installs the public certificate in
+`LocalMachine\Root` and `LocalMachine\TrustedPublisher`. It does not install
+the driver or create a virtual controller. A local test host might also need
+Windows test-signing configuration; the script deliberately does not alter that
+machine-wide setting. Use `tools/build-driver.ps1 -SigningMode Release` for a
+release staging package. That mode deliberately omits the `.cer` and leaves the
+final `.cat` unsigned for SignPath. Never publish the local-test certificate as
+part of a SignPath release archive.
+
 ## Build baseline
 
 The UMDF driver targets x64 and ARM64 Windows 10 or newer, uses UMDF 2.15 or

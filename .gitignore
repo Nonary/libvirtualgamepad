@@ -21,3 +21,4 @@
 /certificates/
 *.pfx
 *.pvk
+*.cer

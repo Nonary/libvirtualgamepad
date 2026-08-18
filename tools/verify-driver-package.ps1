@@ -42,6 +42,7 @@ $driverDir = Join-Path $PackageDir 'driver'
 $inf = Join-Path $driverDir 'VibeshineVhfGamepad.inf'
 $dll = Join-Path $driverDir 'VibeshineVhfGamepad.dll'
 $catalog = Join-Path $driverDir 'VibeshineVhfGamepad.cat'
+$certificatePath = Join-Path $driverDir 'VibeshineVhfGamepad.cer'
 
 foreach ($file in @($inf, $dll, $catalog)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -71,11 +72,35 @@ foreach ($payload in @($inf, $dll)) {
     }
 }
 
-$files = @(
+$catalogSignature = Get-AuthenticodeSignature -LiteralPath $catalog
+if ($null -eq $catalogSignature.SignerCertificate) {
+    throw 'Catalog verification succeeded without an inspectable signer certificate.'
+}
+if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+    throw 'Catalog inspection reported a hash mismatch.'
+}
+
+$signingChannel = 'external-catalog-signing'
+if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
+    $testCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+    $catalogThumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+    $certificateThumbprint = $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+    if ($catalogThumbprint -ne $certificateThumbprint) {
+        throw 'The package public certificate does not match the catalog signer.'
+    }
+    $signingChannel = 'self-signed-local-test'
+}
+
+$relativeFiles = @(
     'driver/VibeshineVhfGamepad.inf',
     'driver/VibeshineVhfGamepad.dll',
     'driver/VibeshineVhfGamepad.cat'
-) | ForEach-Object {
+)
+if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
+    $relativeFiles += 'driver/VibeshineVhfGamepad.cer'
+}
+
+$files = $relativeFiles | ForEach-Object {
     $relativePath = $_
     $fullPath = Join-Path $PackageDir $relativePath
     [ordered]@{
@@ -90,6 +115,11 @@ $manifest = [ordered]@{
     driver_ver = $DriverVer
     platform = $Platform
     protocol_version = 1
+    signing = [ordered]@{
+        channel = $signingChannel
+        signer_subject = $catalogSignature.SignerCertificate.Subject
+        signer_thumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+    }
     files = $files
 }
 $manifestPath = Join-Path $PackageDir 'manifest.json'
