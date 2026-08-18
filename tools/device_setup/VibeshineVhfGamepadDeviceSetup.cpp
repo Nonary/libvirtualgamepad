@@ -1044,6 +1044,70 @@ struct cycle_root_devices_result {
   return escaped;
 }
 
+[[nodiscard]] const wchar_t *problem_code_name(const ULONG problem) {
+  switch (problem) {
+    case 0:
+      return L"none";
+    case 1:
+      return L"CM_PROB_NOT_CONFIGURED";
+    case 10:
+      return L"CM_PROB_FAILED_START";
+    case 18:
+      return L"CM_PROB_REINSTALL";
+    case 19:
+      return L"CM_PROB_REGISTRY";
+    case 22:
+      return L"CM_PROB_DISABLED";
+    case 24:
+      return L"CM_PROB_DEVICE_NOT_THERE";
+    case 28:
+      return L"CM_PROB_FAILED_INSTALL";
+    case 31:
+      return L"CM_PROB_FAILED_ADD";
+    case 37:
+      return L"CM_PROB_FAILED_DRIVER_ENTRY";
+    case 38:
+      return L"CM_PROB_DRIVER_FAILED_PRIOR_UNLOAD";
+    case 39:
+      return L"CM_PROB_DRIVER_FAILED_LOAD";
+    case 41:
+      return L"CM_PROB_FAILED_POST_START";
+    case 51:
+      return L"CM_PROB_WAITING_ON_DEPENDENCY";
+    case 52:
+      return L"CM_PROB_UNSIGNED_DRIVER";
+    default:
+      return L"unknown";
+  }
+}
+
+// Records the PnP state of every owned node while it still exists. Rollback
+// deletes the evidence, so an installer log without this line cannot explain
+// why the source device never started.
+void print_device_diagnostics(const wchar_t *const stage) {
+  std::vector<root_device_state> devices;
+  try {
+    devices = enumerate_root_devices();
+  } catch (const std::exception &error) {
+    std::cerr << "Vibeshine VHF gamepad diagnostics unavailable: " << error.what() << std::endl;
+    return;
+  }
+
+  std::wcout << L"{\"diagnostic\":\"" << stage << L"\",\"devices\":[";
+  bool first = true;
+  for (const auto &device : devices) {
+    if (!first) {
+      std::wcout << L",";
+    }
+    first = false;
+    std::wcout << L"{\"instance_id\":\"" << json_escape(device.instance_id)
+               << L"\",\"device_status\":" << device.status
+               << L",\"problem_code\":" << device.problem
+               << L",\"problem\":\"" << problem_code_name(device.problem) << L"\"}";
+  }
+  std::wcout << L"]}" << std::endl;
+}
+
 void print_status() {
   const auto devices = enumerate_root_devices();
   const bool ready = source_device_interface_ready();
@@ -1145,6 +1209,9 @@ void print_status() {
                 (device_cycle_succeeded && !device_cycle_reboot_required && selected_driver_verified))) {
     owned_reload_verified = true;
     reboot_required = false;
+  }
+  if (!ready) {
+    print_device_diagnostics(L"source_interface_not_ready");
   }
   bool rolled_back = false;
   bool rollback_reboot_required = false;
