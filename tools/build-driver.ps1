@@ -16,6 +16,7 @@ param(
 
     [string] $MSBuildPath,
     [string] $InfVerifPath,
+    [switch] $SkipInfVerif,
     [string] $Inf2CatPath,
     [string] $SignToolPath,
 
@@ -219,6 +220,9 @@ $prepareParameters = @{
 }
 if (-not [string]::IsNullOrWhiteSpace($InfVerifPath)) {
     $prepareParameters.InfVerifPath = $InfVerifPath
+}
+if ($SkipInfVerif) {
+    $prepareParameters.SkipInfVerif = $true
 }
 if (-not [string]::IsNullOrWhiteSpace($Inf2CatPath)) {
     $prepareParameters.Inf2CatPath = $Inf2CatPath

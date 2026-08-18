@@ -17,6 +17,11 @@ param(
     [string] $InfVerifPath,
     [string] $Inf2CatPath,
 
+    # InfVerif ships with the WDK, not the SDK, so a host can carry every other
+    # packaging tool without it. Skipping is explicit and loud because it drops
+    # a real INF quality gate.
+    [switch] $SkipInfVerif,
+
     [ValidateSet('Release', 'LocalTest')]
     [string] $SigningMode = 'Release',
 
@@ -188,12 +193,16 @@ $contents = $contents.Replace('$ARCH$', $arch).Replace('08/16/2026,0.1.0.0', $Dr
 Copy-Item -LiteralPath $dll -Destination $stagedDll
 Copy-Item -LiteralPath $deviceSetup -Destination $stagedDeviceSetup
 
-$infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath
 $inf2Cat = Resolve-SdkTool -Name 'Inf2Cat.exe' -ExplicitPath $Inf2CatPath
 
-& $infVerif '/w' '/v' $inf
-if ($LASTEXITCODE -ne 0) {
-    throw "InfVerif failed with exit code $LASTEXITCODE."
+if ($SkipInfVerif) {
+    Write-Warning 'Skipping InfVerif. Verify this INF on a host with the WDK InfVerif tool before producing a release package.'
+} else {
+    $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath
+    & $infVerif '/w' '/v' $inf
+    if ($LASTEXITCODE -ne 0) {
+        throw "InfVerif failed with exit code $LASTEXITCODE."
+    }
 }
 
 & $inf2Cat "/driver:$driverDir" "/os:$inf2CatTarget"

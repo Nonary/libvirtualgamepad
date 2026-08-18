@@ -91,6 +91,13 @@ Trust that public certificate explicitly on the test host before installation:
 .\tools\verify-driver-package.ps1 -PackageDir .\artifacts\vhf-gamepad-x64-Release-<DriverVer> -Platform x64 -DriverVer <DriverVer> -SourceRevision <git-sha>
 ```
 
+The build script adapts to the installed toolchain: when Visual Studio is newer
+than the WDK integration, or the Spectre-mitigated libraries are absent, it
+warns and passes the matching MSBuild overrides for the driver project instead
+of failing with an error that never mentions drivers. Pass `-SkipInfVerif` on a
+host whose WDK does not ship `InfVerif.exe`; every warning it prints marks a
+gate that a release package must still clear on a fully provisioned host.
+
 On a clean Git worktree, the build script derives `DriverVer` from the latest
 commit date and revision count. While iterating on uncommitted source, pass an
 explicit monotonic newer `-DriverVer` so Windows cannot select an older staged
