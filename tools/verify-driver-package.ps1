@@ -43,8 +43,9 @@ $inf = Join-Path $driverDir 'VibeshineVhfGamepad.inf'
 $dll = Join-Path $driverDir 'VibeshineVhfGamepad.dll'
 $catalog = Join-Path $driverDir 'VibeshineVhfGamepad.cat'
 $certificatePath = Join-Path $driverDir 'VibeshineVhfGamepad.cer'
+$deviceSetup = Join-Path $PackageDir 'tools/VibeshineVhfGamepadDeviceSetup.exe'
 
-foreach ($file in @($inf, $dll, $catalog)) {
+foreach ($file in @($inf, $dll, $catalog, $deviceSetup)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw "Driver package is missing '$file'."
     }
@@ -80,6 +81,20 @@ if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]:
     throw 'Catalog inspection reported a hash mismatch.'
 }
 
+# This executable creates/removes only the package-owned root device. It is
+# intentionally outside the catalog, so it must carry an embedded signature.
+& $signTool verify '/v' '/pa' $deviceSetup
+if ($LASTEXITCODE -ne 0) {
+    throw "Root-device setup tool signature verification failed with exit code $LASTEXITCODE."
+}
+$deviceSetupSignature = Get-AuthenticodeSignature -LiteralPath $deviceSetup
+if ($null -eq $deviceSetupSignature.SignerCertificate) {
+    throw 'Root-device setup tool verification succeeded without an inspectable signer certificate.'
+}
+if ($deviceSetupSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+    throw 'Root-device setup tool inspection reported a hash mismatch.'
+}
+
 $signingChannel = 'external-catalog-signing'
 if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
     $testCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
@@ -88,13 +103,18 @@ if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
     if ($catalogThumbprint -ne $certificateThumbprint) {
         throw 'The package public certificate does not match the catalog signer.'
     }
+    $deviceSetupThumbprint = $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+    if ($deviceSetupThumbprint -ne $certificateThumbprint) {
+        throw 'The package public certificate does not match the root-device setup tool signer.'
+    }
     $signingChannel = 'self-signed-local-test'
 }
 
 $relativeFiles = @(
     'driver/VibeshineVhfGamepad.inf',
     'driver/VibeshineVhfGamepad.dll',
-    'driver/VibeshineVhfGamepad.cat'
+    'driver/VibeshineVhfGamepad.cat',
+    'tools/VibeshineVhfGamepadDeviceSetup.exe'
 )
 if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
     $relativeFiles += 'driver/VibeshineVhfGamepad.cer'
@@ -119,6 +139,8 @@ $manifest = [ordered]@{
         channel = $signingChannel
         signer_subject = $catalogSignature.SignerCertificate.Subject
         signer_thumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+        device_setup_signer_subject = $deviceSetupSignature.SignerCertificate.Subject
+        device_setup_signer_thumbprint = $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
     }
     files = $files
 }

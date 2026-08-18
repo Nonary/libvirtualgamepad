@@ -19,11 +19,15 @@ function Assert-Administrator {
 $PackageDir = [System.IO.Path]::GetFullPath($PackageDir)
 $certificatePath = Join-Path $PackageDir 'driver/VibeshineVhfGamepad.cer'
 $catalogPath = Join-Path $PackageDir 'driver/VibeshineVhfGamepad.cat'
+$deviceSetupPath = Join-Path $PackageDir 'tools/VibeshineVhfGamepadDeviceSetup.exe'
 if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf)) {
     throw "The local-test package does not contain a public certificate: $certificatePath"
 }
 if (-not (Test-Path -LiteralPath $catalogPath -PathType Leaf)) {
     throw "The local-test package does not contain a catalog: $catalogPath"
+}
+if (-not (Test-Path -LiteralPath $deviceSetupPath -PathType Leaf)) {
+    throw "The local-test package does not contain the root-device setup tool: $deviceSetupPath"
 }
 
 Assert-Administrator
@@ -38,6 +42,16 @@ if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]:
 }
 if ($catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $thumbprint) {
     throw 'The package public certificate does not match the catalog signer.'
+}
+$deviceSetupSignature = Get-AuthenticodeSignature -LiteralPath $deviceSetupPath
+if ($null -eq $deviceSetupSignature.SignerCertificate) {
+    throw 'The root-device setup tool has no signer certificate.'
+}
+if ($deviceSetupSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+    throw 'The root-device setup tool has a hash mismatch.'
+}
+if ($deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $thumbprint) {
+    throw 'The package public certificate does not match the root-device setup tool signer.'
 }
 $stores = @('Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPublisher')
 

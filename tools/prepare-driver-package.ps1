@@ -150,6 +150,7 @@ function Get-CertificateStoreScope {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $template = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.inf.in'
 $dll = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepad.dll"
+$deviceSetup = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepadDeviceSetup.exe"
 $arch = if ($Platform -eq 'x64') { 'amd64' } else { 'arm64' }
 $inf2CatTarget = if ($Platform -eq 'x64') { '10_X64' } else { '10_ARM64' }
 
@@ -158,6 +159,9 @@ if (-not (Test-Path -LiteralPath $template -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
     throw "Driver DLL is missing: $dll. Run tools/build-driver.ps1 first."
+}
+if (-not (Test-Path -LiteralPath $deviceSetup -PathType Leaf)) {
+    throw "Root-device setup tool is missing: $deviceSetup. Run tools/build-driver.ps1 first."
 }
 
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
@@ -171,14 +175,18 @@ if (Test-Path -LiteralPath $OutputDir) {
 }
 
 $driverDir = Join-Path $OutputDir 'driver'
+$toolsDir = Join-Path $OutputDir 'tools'
 New-Item -ItemType Directory -Path $driverDir -Force | Out-Null
+New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
 
 $inf = Join-Path $driverDir 'VibeshineVhfGamepad.inf'
 $stagedDll = Join-Path $driverDir 'VibeshineVhfGamepad.dll'
+$stagedDeviceSetup = Join-Path $toolsDir 'VibeshineVhfGamepadDeviceSetup.exe'
 $contents = Get-Content -LiteralPath $template -Raw
 $contents = $contents.Replace('$ARCH$', $arch).Replace('08/16/2026,0.1.0.0', $DriverVer)
 Set-Content -LiteralPath $inf -Value $contents -NoNewline -Encoding utf8
 Copy-Item -LiteralPath $dll -Destination $stagedDll
+Copy-Item -LiteralPath $deviceSetup -Destination $stagedDeviceSetup
 
 $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath
 $inf2Cat = Resolve-SdkTool -Name 'Inf2Cat.exe' -ExplicitPath $Inf2CatPath
@@ -200,7 +208,7 @@ if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
 
 if ($SigningMode -eq 'Release') {
     Write-Output "Prepared unsigned $Platform driver package in $OutputDir"
-    Write-Output 'Next: SignPath-sign only driver/VibeshineVhfGamepad.cat, then run tools/verify-driver-package.ps1 to verify final catalog membership and write manifest.json.'
+    Write-Output 'Next: SignPath-sign driver/VibeshineVhfGamepad.cat and tools/VibeshineVhfGamepadDeviceSetup.exe, then run tools/verify-driver-package.ps1 to verify the final package and write manifest.json.'
     return
 }
 
@@ -210,26 +218,47 @@ $certificateThumbprint = $certificate.Thumbprint.Replace(' ', '').ToUpperInvaria
 $certificatePath = Join-Path $driverDir 'VibeshineVhfGamepad.cer'
 Export-Certificate -Cert $certificate -FilePath $certificatePath -Force | Out-Null
 
-$signArguments = @('sign', '/fd', 'SHA256')
-if ((Get-CertificateStoreScope -Certificate $certificate) -eq 'LocalMachine') {
-    $signArguments += '/sm'
-}
-$signArguments += @('/sha1', $certificateThumbprint, $catalog)
-& $signTool @signArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Local catalog signing failed with exit code $LASTEXITCODE."
+function Sign-LocalFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FilePath
+    )
+
+    $signArguments = @('sign', '/fd', 'SHA256')
+    if ((Get-CertificateStoreScope -Certificate $certificate) -eq 'LocalMachine') {
+        $signArguments += '/sm'
+    }
+    $signArguments += @('/sha1', $certificateThumbprint, $FilePath)
+    & $signTool @signArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Local signing failed for '$FilePath' with exit code $LASTEXITCODE."
+    }
 }
 
-$catalogSignature = Get-AuthenticodeSignature -LiteralPath $catalog
-if ($null -eq $catalogSignature.SignerCertificate) {
-    throw 'Local catalog signing completed without a signer certificate.'
+function Assert-LocalSigner {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FilePath
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $FilePath
+    if ($null -eq $signature.SignerCertificate) {
+        throw "Local signing completed without a signer certificate for '$FilePath'."
+    }
+    if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+        throw "Local signing produced a hash mismatch for '$FilePath'."
+    }
+    if ($signature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $certificateThumbprint) {
+        throw "The local signer for '$FilePath' does not match the exported public certificate."
+    }
 }
-if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
-    throw 'Local catalog signing produced a catalog hash mismatch.'
-}
-if ($catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $certificateThumbprint) {
-    throw 'The local catalog signer does not match the exported public certificate.'
-}
+
+Sign-LocalFile -FilePath $catalog
+# The setup tool is deliberately outside the driver catalog, so embedding its
+# local signature after Inf2Cat does not change catalog membership.
+Sign-LocalFile -FilePath $stagedDeviceSetup
+Assert-LocalSigner -FilePath $catalog
+Assert-LocalSigner -FilePath $stagedDeviceSetup
 
 Write-Output "Prepared locally signed $Platform driver package in $OutputDir"
 Write-Output "Exported the public test certificate: $certificatePath"

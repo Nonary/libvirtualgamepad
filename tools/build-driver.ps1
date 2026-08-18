@@ -83,7 +83,8 @@ function Resolve-MSBuild {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$project = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.vcxproj'
+$driverProject = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.vcxproj'
+$deviceSetupProject = Join-Path $repoRoot 'tools/device_setup/VibeshineVhfGamepadDeviceSetup.vcxproj'
 $driverVer = Resolve-DriverVer -ExplicitDriverVer $DriverVer -RepositoryRoot $repoRoot
 $msbuild = Resolve-MSBuild -ExplicitPath $MSBuildPath
 
@@ -92,14 +93,23 @@ if ([string]::IsNullOrWhiteSpace($PackageDir)) {
     $PackageDir = Join-Path $repoRoot "artifacts/vhf-gamepad-$Platform-$Configuration-$safeDriverVer"
 }
 
-& $msbuild $project '/t:Build' "/p:Configuration=$Configuration" "/p:Platform=$Platform" '/m'
-if ($LASTEXITCODE -ne 0) {
-    throw "UMDF build failed with exit code $LASTEXITCODE."
+foreach ($project in @($driverProject, $deviceSetupProject)) {
+    if (-not (Test-Path -LiteralPath $project -PathType Leaf)) {
+        throw "Build project is missing: $project"
+    }
+    & $msbuild $project '/t:Build' "/p:Configuration=$Configuration" "/p:Platform=$Platform" '/m'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Build failed for '$project' with exit code $LASTEXITCODE."
+    }
 }
 
 $driver = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepad.dll"
+$deviceSetup = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepadDeviceSetup.exe"
 if (-not (Test-Path -LiteralPath $driver -PathType Leaf)) {
     throw "Build completed without the expected driver DLL: $driver"
+}
+if (-not (Test-Path -LiteralPath $deviceSetup -PathType Leaf)) {
+    throw "Build completed without the expected root-device setup tool: $deviceSetup"
 }
 
 $prepare = Join-Path $PSScriptRoot 'prepare-driver-package.ps1'
@@ -129,9 +139,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Output "Built $driver"
+Write-Output "Built $deviceSetup"
 Write-Output "Prepared $SigningMode package: $([System.IO.Path]::GetFullPath($PackageDir))"
 if ($SigningMode -eq 'LocalTest') {
     Write-Output 'Next: run tools/trust-test-certificate.ps1 elevated on the test host, then run tools/verify-driver-package.ps1.'
 } else {
-    Write-Output 'Next: SignPath-sign only driver/VibeshineVhfGamepad.cat, then run tools/verify-driver-package.ps1.'
+    Write-Output 'Next: SignPath-sign driver/VibeshineVhfGamepad.cat and tools/VibeshineVhfGamepadDeviceSetup.exe, then run tools/verify-driver-package.ps1.'
 }

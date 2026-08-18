@@ -59,23 +59,29 @@ driver/
   VibeshineVhfGamepad.inf
   VibeshineVhfGamepad.dll
   VibeshineVhfGamepad.cat
+tools/
+  VibeshineVhfGamepadDeviceSetup.exe
 manifest.json
 ```
 
 The release order is final architecture-matched INF/DLL -> `Inf2Cat` ->
-SignPath-sign the generated catalog -> verify catalog membership and write the
-final manifest -> publish. `tools/prepare-driver-package.ps1` creates an
-unsigned staging directory and refuses to overwrite an existing one.
+SignPath-sign the generated catalog and the separately packaged setup tool ->
+verify catalog membership and both signatures -> write the final manifest ->
+publish. `tools/prepare-driver-package.ps1` creates an unsigned staging
+directory and refuses to overwrite an existing one.
 `tools/verify-driver-package.ps1` verifies the signed catalog against the final
-INF/DLL and only then writes `manifest.json`, because catalog signing changes
-the catalog hash. Vibeshine must consume a pinned signed package and must not
-deep-sign the catalog-bound DLL inside its MSI. Local test packages use a
-clearly separate local test certificate.
+INF/DLL, then verifies the setup tool's embedded signature, and only then
+writes `manifest.json`. The tool is intentionally outside the catalog because
+it is not a driver payload. Vibeshine must consume a pinned signed package and
+must not rewrite either the catalog-bound DLL or the manifest-hashed setup tool
+inside its MSI. Local test packages use a clearly separate local test
+certificate.
 
 For a local test build, `tools/build-driver.ps1` follows the same package model
-as Vibeshine's virtual-display driver: it builds the DLL, generates the final
-INF/catalog, creates or reuses `CN=Vibeshine VHF Gamepad Test` in
-`CurrentUser\My`, signs only the catalog, and exports the public certificate as
+as Vibeshine's virtual-display driver: it builds the UMDF DLL and the owned
+root-device setup tool, generates the final INF/catalog, creates or reuses
+`CN=Vibeshine VHF Gamepad Test` in `CurrentUser\My`, signs the catalog and the
+setup tool, and exports the public certificate as
 `driver/VibeshineVhfGamepad.cer`. The private key never enters the package.
 Trust that public certificate explicitly on the test host before installation:
 
@@ -96,8 +102,22 @@ the driver or create a virtual controller. A local test host might also need
 Windows test-signing configuration; the script deliberately does not alter that
 machine-wide setting. Use `tools/build-driver.ps1 -SigningMode Release` for a
 release staging package. That mode deliberately omits the `.cer` and leaves the
-final `.cat` unsigned for SignPath. Never publish the local-test certificate as
-part of a SignPath release archive.
+final `.cat` and setup tool unsigned for their separate SignPath requests.
+Never publish the local-test certificate as part of a SignPath release archive.
+
+The setup tool creates or removes only `ROOT\VIBESHINEVIRTUALGAMEPAD`; it does
+not enumerate physical HID devices or manage third-party virtual-controller
+packages. Installing the INF into the Driver Store is not enough for this
+root-enumerated source driver—the setup tool creates the source node and waits
+for its private control interface before reporting success.
+
+When Windows asks for a restart during installation, the setup tool first tries
+to activate the exact owned source node in the current session: it
+re-enumerates it, requests a PnP property-change restart, and then performs one
+owned-node disable/enable cycle only if the private interface is still absent.
+It never restarts shared UMDF hosts or unrelated HID devices. A reboot is
+reported only when that bounded recovery cannot reload the owned node and
+prove both the source interface and the selected driver version are live.
 
 ## Build baseline
 
