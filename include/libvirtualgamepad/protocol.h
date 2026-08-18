@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include <windows.h>
+#include <winioctl.h>
 
 namespace lvg {
 

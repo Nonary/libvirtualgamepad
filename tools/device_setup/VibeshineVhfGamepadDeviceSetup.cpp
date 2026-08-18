@@ -43,6 +43,14 @@ constexpr DWORD k_protocol_query_timeout_milliseconds = 1000;
 constexpr DWORD k_protocol_cancel_timeout_milliseconds = 1000;
 constexpr int k_exit_reboot_required = 3010;
 
+// DEVPKEY_Device_DriverVersion is declared by devpkey.h rather than exported
+// by a system library. Keep the one property key we use local to this helper
+// so the helper has no INITGUID/link-time dependency.
+constexpr DEVPROPKEY k_device_driver_version {
+  {0xa8b865dd, 0x2e3d, 0x4094, {0xad, 0x97, 0xe5, 0x93, 0xa7, 0x0c, 0x75, 0xd6}},
+  3,
+};
+
 static_assert(std::wstring_view(lvg::k_root_hardware_id).starts_with(k_root_enumerator_prefix));
 static_assert(
     std::wstring_view(lvg::k_root_hardware_id).substr(k_root_enumerator_prefix.size()) == k_root_device_id);
@@ -314,7 +322,7 @@ void validate_owned_inf_path(const std::wstring &absolute_path) {
   if (SetupDiGetDevicePropertyW(
           device_set,
           device,
-          &DEVPKEY_Device_DriverVersion,
+          &k_device_driver_version,
           &property_type,
           nullptr,
           0,
@@ -331,7 +339,7 @@ void validate_owned_inf_path(const std::wstring &absolute_path) {
   if (!SetupDiGetDevicePropertyW(
           device_set,
           device,
-          &DEVPKEY_Device_DriverVersion,
+          &k_device_driver_version,
           &property_type,
           reinterpret_cast<PBYTE>(buffer.data()),
           required_bytes,
@@ -1067,7 +1075,7 @@ void print_status() {
   } catch (...) {
     if (created) {
       try {
-        remove_device_instance(created_instance);
+        static_cast<void>(remove_device_instance(created_instance));
       } catch (...) {
       }
     }

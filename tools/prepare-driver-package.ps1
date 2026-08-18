@@ -184,7 +184,7 @@ $stagedDll = Join-Path $driverDir 'VibeshineVhfGamepad.dll'
 $stagedDeviceSetup = Join-Path $toolsDir 'VibeshineVhfGamepadDeviceSetup.exe'
 $contents = Get-Content -LiteralPath $template -Raw
 $contents = $contents.Replace('$ARCH$', $arch).Replace('08/16/2026,0.1.0.0', $DriverVer)
-Set-Content -LiteralPath $inf -Value $contents -NoNewline -Encoding utf8
+[System.IO.File]::WriteAllText($inf, $contents, [System.Text.Encoding]::Unicode)
 Copy-Item -LiteralPath $dll -Destination $stagedDll
 Copy-Item -LiteralPath $deviceSetup -Destination $stagedDeviceSetup
 

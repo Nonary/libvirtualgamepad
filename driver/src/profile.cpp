@@ -160,8 +160,8 @@ feedback_event encode_generic_feedback(
   event.controller_id = controller_id;
   event.type = feedback_type::generic_rumble_rgb;
   const generic_rumble_rgb_feedback feedback {
-    static_cast<std::uint16_t>(output.low_frequency_rumble) << 8,
-    static_cast<std::uint16_t>(output.high_frequency_rumble) << 8,
+    static_cast<std::uint16_t>(static_cast<std::uint16_t>(output.low_frequency_rumble) << 8u),
+    static_cast<std::uint16_t>(static_cast<std::uint16_t>(output.high_frequency_rumble) << 8u),
     output.red,
     output.green,
     output.blue,

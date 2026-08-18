@@ -15,7 +15,9 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{40,64}$')]
     [string] $SourceRevision,
 
-    [string] $SignToolPath
+    [string] $SignToolPath,
+
+    [switch] $AllowLocalTestCertificate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,19 +59,31 @@ if ($null -eq $infDriverVer -or $infDriverVer.Matches[0].Groups[1].Value.Trim() 
 }
 
 $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+$testCertificate = $null
+if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
+    if (-not $AllowLocalTestCertificate) {
+        throw 'Refusing a self-signed local-test package without -AllowLocalTestCertificate.'
+    }
+    $testCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+} elseif ($AllowLocalTestCertificate) {
+    throw '-AllowLocalTestCertificate requires driver/VibeshineVhfGamepad.cer.'
+}
+$usesLocalTestCertificate = $null -ne $testCertificate
 
 # A catalog is the release signature. Verify both the catalog itself and its
 # binding to the exact final INF and UMDF DLL. Do not re-sign this DLL after
 # the catalog has been created.
-& $signTool verify '/v' '/pa' $catalog
-if ($LASTEXITCODE -ne 0) {
-    throw "Catalog signature verification failed with exit code $LASTEXITCODE."
-}
-
-foreach ($payload in @($inf, $dll)) {
-    & $signTool verify '/v' '/pa' '/c' $catalog $payload
+if (-not $usesLocalTestCertificate) {
+    & $signTool verify '/v' '/pa' $catalog
     if ($LASTEXITCODE -ne 0) {
-        throw "Catalog membership verification failed for '$payload' with exit code $LASTEXITCODE."
+        throw "Catalog signature verification failed with exit code $LASTEXITCODE."
+    }
+
+    foreach ($payload in @($inf, $dll)) {
+        & $signTool verify '/v' '/pa' '/c' $catalog $payload
+        if ($LASTEXITCODE -ne 0) {
+            throw "Catalog membership verification failed for '$payload' with exit code $LASTEXITCODE."
+        }
     }
 }
 
@@ -80,12 +94,17 @@ if ($null -eq $catalogSignature.SignerCertificate) {
 if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
     throw 'Catalog inspection reported a hash mismatch.'
 }
+if ($usesLocalTestCertificate -and $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()) {
+    throw 'The package public certificate does not match the catalog signer.'
+}
 
 # This executable creates/removes only the package-owned root device. It is
 # intentionally outside the catalog, so it must carry an embedded signature.
-& $signTool verify '/v' '/pa' $deviceSetup
-if ($LASTEXITCODE -ne 0) {
-    throw "Root-device setup tool signature verification failed with exit code $LASTEXITCODE."
+if (-not $usesLocalTestCertificate) {
+    & $signTool verify '/v' '/pa' $deviceSetup
+    if ($LASTEXITCODE -ne 0) {
+        throw "Root-device setup tool signature verification failed with exit code $LASTEXITCODE."
+    }
 }
 $deviceSetupSignature = Get-AuthenticodeSignature -LiteralPath $deviceSetup
 if ($null -eq $deviceSetupSignature.SignerCertificate) {
@@ -94,10 +113,12 @@ if ($null -eq $deviceSetupSignature.SignerCertificate) {
 if ($deviceSetupSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
     throw 'Root-device setup tool inspection reported a hash mismatch.'
 }
+if ($usesLocalTestCertificate -and $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()) {
+    throw 'The package public certificate does not match the root-device setup tool signer.'
+}
 
 $signingChannel = 'external-catalog-signing'
-if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
-    $testCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+if ($usesLocalTestCertificate) {
     $catalogThumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
     $certificateThumbprint = $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
     if ($catalogThumbprint -ne $certificateThumbprint) {
@@ -147,5 +168,9 @@ $manifest = [ordered]@{
 $manifestPath = Join-Path $PackageDir 'manifest.json'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -NoNewline -Encoding utf8
 
-Write-Output "Verified signed catalog and final payload binding for $PackageDir"
+if ($usesLocalTestCertificate) {
+    Write-Output "Verified local signer identity for $PackageDir"
+} else {
+    Write-Output "Verified signed catalog and final payload binding for $PackageDir"
+}
 Write-Output "Wrote final manifest: $manifestPath"

@@ -5,6 +5,9 @@
 // exposes a private control interface to Vibeshine; VHF creates the HID child
 // for each active controller.
 
+#define WIN32_NO_STATUS
+#include <windows.h>
+#undef WIN32_NO_STATUS
 #include <wdf.h>
 #include <vhf.h>
 
@@ -64,7 +67,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(target_context, get_target_context);
 
 EVT_WDF_DRIVER_DEVICE_ADD evt_device_add;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_vhf_target_cleanup;
-EVT_WDF_FILE_CREATE evt_file_create;
+EVT_WDF_DEVICE_FILE_CREATE evt_file_create;
 EVT_WDF_FILE_CLOSE evt_file_close;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL evt_io_device_control;
 EVT_VHF_ASYNC_OPERATION evt_vhf_write_report;
@@ -604,7 +607,6 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   WDF_OBJECT_ATTRIBUTES file_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&file_attributes);
   WdfDeviceInitSetFileObjectConfig(device_init, &file_config, &file_attributes);
-  WdfDeviceInitSetDeviceType(device_init, FILE_DEVICE_UNKNOWN);
 
   WDF_OBJECT_ATTRIBUTES device_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&device_attributes, device_context);
