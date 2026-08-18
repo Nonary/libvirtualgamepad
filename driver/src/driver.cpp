@@ -54,6 +54,7 @@ struct device_context {
   WDFWAITLOCK state_lock;
   WDFIOTARGET local_vhf_target;
   HANDLE vhf_file_handle;
+  bool vhf_target_open;
   bool stopping;
   controller_slot controllers[lvg::k_max_controllers];
 };
@@ -66,6 +67,8 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(device_context, get_device_context);
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(target_context, get_target_context);
 
 EVT_WDF_DRIVER_DEVICE_ADD evt_device_add;
+EVT_WDF_DEVICE_PREPARE_HARDWARE evt_prepare_hardware;
+EVT_WDF_DEVICE_RELEASE_HARDWARE evt_release_hardware;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_vhf_target_cleanup;
 EVT_WDF_DEVICE_FILE_CREATE evt_file_create;
 EVT_WDF_FILE_CLOSE evt_file_close;
@@ -87,6 +90,44 @@ void lock_lifetime(device_context *const context) noexcept {
 
 void unlock_lifetime(device_context *const context) noexcept {
   WdfWaitLockRelease(context->lifetime_gate);
+}
+
+// Opening the local I/O target by file is a create against this device's own
+// stack, so it only succeeds once PnP has started the device. Callers own the
+// lifetime gate; the open is idempotent so both the start path and the first
+// controller creation can drive it.
+[[nodiscard]] NTSTATUS ensure_vhf_target_open(device_context *const context) noexcept {
+  lock_context(context);
+  const WDFIOTARGET target = context->local_vhf_target;
+  const bool opened = context->vhf_file_handle != nullptr;
+  const bool stopping = context->stopping;
+  unlock_context(context);
+
+  if (opened) {
+    return STATUS_SUCCESS;
+  }
+  if (stopping || target == nullptr) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+
+  WDF_IO_TARGET_OPEN_PARAMS open_params;
+  WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_FILE(&open_params, nullptr);
+  const NTSTATUS status = WdfIoTargetOpen(target, &open_params);
+  if (!NT_SUCCESS(status)) {
+    return status;
+  }
+
+  const HANDLE file_handle = WdfIoTargetWdmGetTargetFileHandle(target);
+  if (file_handle == nullptr) {
+    WdfIoTargetClose(target);
+    return STATUS_DEVICE_NOT_READY;
+  }
+
+  lock_context(context);
+  context->vhf_file_handle = file_handle;
+  context->vhf_target_open = true;
+  unlock_context(context);
+  return STATUS_SUCCESS;
 }
 
 [[nodiscard]] bool is_owned_by(
@@ -206,12 +247,30 @@ void destroy_owned_controller(
   slot.feedback_pending = false;
   unlock_context(context);
 
+  // The start path already opens this target. Retrying here keeps a source
+  // device that started before its own stack could answer a create usable.
+  const NTSTATUS open_status = ensure_vhf_target_open(context);
+  if (!NT_SUCCESS(open_status)) {
+    release_starting_slot(context, &slot, owner);
+    unlock_lifetime(context);
+    return open_status;
+  }
+
+  lock_context(context);
+  const HANDLE file_handle = context->vhf_file_handle;
+  unlock_context(context);
+  if (file_handle == nullptr) {
+    release_starting_slot(context, &slot, owner);
+    unlock_lifetime(context);
+    return STATUS_DEVICE_NOT_READY;
+  }
+
   // State is completely initialized before VhfStart: the framework is allowed
   // to enter an output callback before VhfStart returns.
   VHF_CONFIG config;
   VHF_CONFIG_INIT(
     &config,
-    context->vhf_file_handle,
+    file_handle,
     static_cast<USHORT>(definition->report_descriptor_size),
     const_cast<PUCHAR>(definition->report_descriptor));
   config.VhfClientContext = &slot;
@@ -555,23 +614,20 @@ void evt_file_close(WDFFILEOBJECT file_object) {
   }
 }
 
-// WDF guarantees that an I/O target's FileHandle remains valid through this
-// target cleanup callback when the target is deleted while still open. The
-// target is parented below state_lock and lifetime_gate, so both locks and the
-// device context remain valid for the complete callback.
-void evt_vhf_target_cleanup(WDFOBJECT object) {
-  auto *const target = get_target_context(reinterpret_cast<WDFIOTARGET>(object));
-  auto *const context = target->device;
-  if (context == nullptr) {
-    return;
-  }
+// Tears down every controller this device owns and drops the VHF file handle.
+// Callers must hold neither lock. forget_target is set only when the target
+// object itself is going away.
+void stop_owned_controllers(device_context *const context, const bool forget_target) noexcept {
   VHFHANDLE handles[lvg::k_max_controllers] {};
 
   lock_lifetime(context);
   lock_context(context);
   context->stopping = true;
   context->vhf_file_handle = nullptr;
-  context->local_vhf_target = nullptr;
+  if (forget_target) {
+    context->local_vhf_target = nullptr;
+    context->vhf_target_open = false;
+  }
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     auto &slot = context->controllers[index];
     slot.feedback_pending = false;
@@ -585,15 +641,64 @@ void evt_vhf_target_cleanup(WDFOBJECT object) {
   }
   unlock_context(context);
 
-  // Do not close the target here. It is being deleted while still open, which
-  // keeps its UMDF file handle valid through this callback; WDF closes it after
-  // VhfDelete has synchronously removed every virtual HID child.
   for (const auto handle : handles) {
     if (handle != nullptr) {
       VhfDelete(handle, TRUE);
     }
   }
   unlock_lifetime(context);
+}
+
+// WDF guarantees that an I/O target's FileHandle remains valid through this
+// target cleanup callback when the target is deleted while still open. The
+// target is parented below state_lock and lifetime_gate, so both locks and the
+// device context remain valid for the complete callback.
+//
+// Do not close the target here. It is being deleted while still open, which
+// keeps its UMDF file handle valid through this callback; WDF closes it after
+// VhfDelete has synchronously removed every virtual HID child.
+void evt_vhf_target_cleanup(WDFOBJECT object) {
+  auto *const target = get_target_context(reinterpret_cast<WDFIOTARGET>(object));
+  auto *const context = target->device;
+  if (context == nullptr) {
+    return;
+  }
+  stop_owned_controllers(context, true);
+}
+
+// A UMDF source driver cannot open its own local target before the device is
+// started: EvtDeviceAdd runs ahead of PnP start, the create fails with
+// STATUS_DEVICE_NOT_READY, and the whole device stops with CM_PROB_FAILED_ADD.
+// The documented VHF flow opens the target from the start path instead.
+NTSTATUS evt_prepare_hardware(WDFDEVICE device, WDFCMRESLIST, WDFCMRESLIST) {
+  auto *const context = get_device_context(device);
+
+  lock_lifetime(context);
+  lock_context(context);
+  context->stopping = false;
+  unlock_context(context);
+  // A source device that cannot reach VHF yet still answers protocol queries
+  // and retries the open when a controller is created, so a failure here must
+  // not keep the device from starting.
+  static_cast<void>(ensure_vhf_target_open(context));
+  unlock_lifetime(context);
+  return STATUS_SUCCESS;
+}
+
+NTSTATUS evt_release_hardware(WDFDEVICE device, WDFCMRESLIST) {
+  auto *const context = get_device_context(device);
+  stop_owned_controllers(context, false);
+
+  lock_lifetime(context);
+  lock_context(context);
+  const WDFIOTARGET target = context->vhf_target_open ? context->local_vhf_target : nullptr;
+  context->vhf_target_open = false;
+  unlock_context(context);
+  if (target != nullptr) {
+    WdfIoTargetClose(target);
+  }
+  unlock_lifetime(context);
+  return STATUS_SUCCESS;
 }
 
 NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
@@ -607,6 +712,12 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   WDF_OBJECT_ATTRIBUTES file_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&file_attributes);
   WdfDeviceInitSetFileObjectConfig(device_init, &file_config, &file_attributes);
+
+  WDF_PNPPOWER_EVENT_CALLBACKS pnp_callbacks;
+  WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnp_callbacks);
+  pnp_callbacks.EvtDevicePrepareHardware = evt_prepare_hardware;
+  pnp_callbacks.EvtDeviceReleaseHardware = evt_release_hardware;
+  WdfDeviceInitSetPnpPowerEventCallbacks(device_init, &pnp_callbacks);
 
   WDF_OBJECT_ATTRIBUTES device_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&device_attributes, device_context);
@@ -650,17 +761,6 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
     return status;
   }
   get_target_context(context->local_vhf_target)->device = context;
-
-  WDF_IO_TARGET_OPEN_PARAMS open_params;
-  WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_FILE(&open_params, nullptr);
-  status = WdfIoTargetOpen(context->local_vhf_target, &open_params);
-  if (!NT_SUCCESS(status)) {
-    return status;
-  }
-  context->vhf_file_handle = WdfIoTargetWdmGetTargetFileHandle(context->local_vhf_target);
-  if (context->vhf_file_handle == nullptr) {
-    return STATUS_DEVICE_NOT_READY;
-  }
 
   status = WdfDeviceCreateDeviceInterface(device, &lvg::k_device_interface_guid, nullptr);
   if (!NT_SUCCESS(status)) {

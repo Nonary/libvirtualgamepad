@@ -15,32 +15,45 @@ DriverVer=08/16/2026,0.1.0.0
 PnpLockdown=1
 
 [Manufacturer]
-%Vibeshine%=Vibeshine,NT$ARCH$.10.0...17134,NT$ARCH$.10.0...22000
+%Vibeshine%=Vibeshine,NT$ARCH$.10.0...19041,NT$ARCH$.10.0...22000
 
-[Vibeshine.NT$ARCH$.10.0...17134]
+[Vibeshine.NT$ARCH$.10.0...19041]
 %DeviceName%=VibeshineVhfGamepad_Install_Win10,ROOT\VIBESHINEVIRTUALGAMEPAD
 
 [Vibeshine.NT$ARCH$.10.0...22000]
 %DeviceName%=VibeshineVhfGamepad_Install_Win11,ROOT\VIBESHINEVIRTUALGAMEPAD
 
-; ====================== Windows 10 1803 through Windows 10 =====================
+; ================= Windows 10 1909 through Windows 10 =========================
+; Windows 10 predates the inbox WUDFRD filter sections, so this variant adds the
+; reflector as an upper filter itself. VHF still owns the function driver slot.
 
 [VibeshineVhfGamepad_Install_Win10.NT]
+Include=hidvhf.inf
+Needs=vhfservice.NT
 CopyFiles=VibeshineVhfGamepad.CopyFiles
 
 [VibeshineVhfGamepad_Install_Win10.NT.HW]
+Include=hidvhf.inf
+Needs=vhfservice.NT.HW
 AddReg=VibeshineVhfGamepad_Install.AddReg
 
 [VibeshineVhfGamepad_Install_Win10.NT.Services]
-AddService=WUDFRd,0x000001fa,WUDFRd_ServiceInstall
+Include=hidvhf.inf
+Needs=vhfservice.NT.Services
+AddService=WUDFRd,0x000001f8,WUDFRd_ServiceInstall
+
+[VibeshineVhfGamepad_Install_Win10.NT.Filters]
+AddFilter=WUDFRd,,WUDFRd_UpperFilterPosition
 
 [VibeshineVhfGamepad_Install_Win10.NT.Wdf]
 UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
 UmdfServiceOrder=VibeshineVhfGamepad
-UmdfDispatcher=FileHandle
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[WUDFRd_UpperFilterPosition]
+FilterPosition=Upper
 
 [WUDFRd_ServiceInstall]
 DisplayName=%WUDFRdServiceName%
@@ -52,23 +65,26 @@ ServiceBinary=%12%\WUDFRd.sys
 ; ================================ Windows 11 ==================================
 
 [VibeshineVhfGamepad_Install_Win11.NT]
-Include=WUDFRD.inf
-Needs=WUDFRD.NT
+Include=WUDFRD.inf,hidvhf.inf
+Needs=WUDFRD_UpperFilter.NT,vhfservice.NT
 CopyFiles=VibeshineVhfGamepad.CopyFiles
 
 [VibeshineVhfGamepad_Install_Win11.NT.HW]
-Include=WUDFRD.inf
-Needs=WUDFRD.NT.HW
+Include=WUDFRD.inf,hidvhf.inf
+Needs=WUDFRD_UpperFilter.NT.HW,vhfservice.NT.HW
 AddReg=VibeshineVhfGamepad_Install.AddReg
 
 [VibeshineVhfGamepad_Install_Win11.NT.Services]
+Include=WUDFRD.inf,hidvhf.inf
+Needs=WUDFRD_UpperFilter.NT.Services,vhfservice.NT.Services
+
+[VibeshineVhfGamepad_Install_Win11.NT.Filters]
 Include=WUDFRD.inf
-Needs=WUDFRD.NT.Services
+Needs=WUDFRD_UpperFilter.NT.Filters
 
 [VibeshineVhfGamepad_Install_Win11.NT.Wdf]
 UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
 UmdfServiceOrder=VibeshineVhfGamepad
-UmdfDispatcher=FileHandle
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
@@ -76,9 +92,6 @@ UmdfFsContextUsePolicy=CannotUseFsContexts
 ; ================================ Shared =======================================
 
 [VibeshineVhfGamepad_Install.AddReg]
-; hidvhf.inf instructs third-party VHF source drivers to name vhf directly.
-; WUDFRd is associated through this package's version-specific sections.
-HKR,,LowerFilters,0x00010000,"vhf"
 ; This is a UMDF source device, so its stack security belongs in the INF.
 ; Permit only the interactive user session to create virtual controllers;
 ; SYSTEM and Administrators retain full access for installation and recovery.
