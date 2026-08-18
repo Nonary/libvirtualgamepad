@@ -182,9 +182,12 @@ void validate_owned_inf_path(const std::wstring &absolute_path) {
     DWORD characters = 0;
     // DriverVer has two INF fields: date,version. The version is the value
     // Windows publishes through DEVPKEY_Device_DriverVersion.
-    if (SetupGetStringFieldW(&context, 2, nullptr, 0, &characters) ||
-        GetLastError() != ERROR_INSUFFICIENT_BUFFER || characters == 0) {
+    const BOOL size_query_succeeded = SetupGetStringFieldW(&context, 2, nullptr, 0, &characters);
+    if (!size_query_succeeded && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
       throw_last_error("SetupGetStringFieldW(DriverVer size)");
+    }
+    if (characters == 0) {
+      throw std::runtime_error("VibeshineVhfGamepad.inf has an empty DriverVer field");
     }
     std::vector<wchar_t> buffer(characters);
     if (!SetupGetStringFieldW(&context, 2, buffer.data(), static_cast<DWORD>(buffer.size()), &characters)) {
