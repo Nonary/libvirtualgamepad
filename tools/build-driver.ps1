@@ -82,6 +82,94 @@ function Resolve-MSBuild {
     return $candidate.Source
 }
 
+# The WDK's Visual Studio integration is versioned against one MSBuild and one
+# set of platform toolsets. A newer Visual Studio, or an install without the
+# Spectre-mitigated runtime libraries, otherwise fails the driver project with
+# errors that say nothing about drivers. Detect those exact mismatches and pass
+# the corresponding overrides instead of asking the caller to guess them.
+function Resolve-WdkContentRoot {
+    foreach ($key in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots',
+        'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows Kits\Installed Roots'
+    )) {
+        $root = (Get-ItemProperty -Path $key -Name 'KitsRoot10' -ErrorAction SilentlyContinue).KitsRoot10
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            return $root.TrimEnd('\')
+        }
+    }
+    return $null
+}
+
+function Get-DriverProjectOverrides {
+    param(
+        [Parameter(Mandatory = $true)][string] $MSBuildPath,
+        [Parameter(Mandatory = $true)][string] $Platform,
+        [Parameter(Mandatory = $true)][string] $KitVersion
+    )
+
+    $overrides = @()
+    $msbuildMajor = (Get-Item -LiteralPath $MSBuildPath).VersionInfo.FileMajorPart
+
+    $wdkRoot = Resolve-WdkContentRoot
+    if ($null -ne $wdkRoot) {
+        $taskDir = Join-Path $wdkRoot "build\$KitVersion\bin"
+        if (Test-Path -LiteralPath $taskDir -PathType Container) {
+            $expected = Join-Path $taskDir "Microsoft.DriverKit.Build.Tasks.$msbuildMajor.0.dll"
+            if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+                $available = @(Get-ChildItem -LiteralPath $taskDir -Filter 'Microsoft.DriverKit.Build.Tasks.*.dll' -ErrorAction SilentlyContinue |
+                    ForEach-Object { if ($_.Name -match 'Tasks\.(\d+)\.0\.dll$') { [int] $Matches[1] } } |
+                    Sort-Object -Descending)
+                if ($available.Count -eq 0) {
+                    throw "The Windows Kit at '$wdkRoot' has no MSBuild task assembly for driver projects. Install the WDK build tools for kit $KitVersion."
+                }
+                Write-Warning "MSBuild $msbuildMajor has no matching WDK task assembly; building the driver as Visual Studio $($available[0]).0."
+                $overrides += "/p:VisualStudioVersion=$($available[0]).0"
+            }
+        }
+    }
+
+    # The WDK toolset imports v143 (or v142) from the Visual Studio it shipped
+    # for. A Visual Studio that only carries a newer toolset needs that toolset
+    # named explicitly, otherwise the import fails before the driver compiles.
+    $msbuildRoot = (Get-Item -LiteralPath $MSBuildPath).Directory
+    while ($null -ne $msbuildRoot -and $msbuildRoot.Name -ne 'MSBuild') {
+        $msbuildRoot = $msbuildRoot.Parent
+    }
+    if ($null -eq $msbuildRoot) {
+        # An unrecognized layout is not worth guessing at: build with defaults.
+        return $overrides
+    }
+    $platformToolsets = @(Get-ChildItem -Path (Join-Path $msbuildRoot.FullName 'Microsoft\VC') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName "Platforms\$Platform\PlatformToolsets" } |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ 'WindowsUserModeDriver10.0') -PathType Container })
+    foreach ($toolsetDir in $platformToolsets) {
+        if ((Test-Path -LiteralPath (Join-Path $toolsetDir 'v143') -PathType Container) -or
+            (Test-Path -LiteralPath (Join-Path $toolsetDir 'v142') -PathType Container)) {
+            continue
+        }
+        $fallback = @(Get-ChildItem -LiteralPath $toolsetDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v\d+$' } | Sort-Object Name -Descending | Select-Object -First 1)
+        if ($fallback.Count -eq 0) {
+            continue
+        }
+        Write-Warning "The WDK toolset expects the v143 platform toolset; building the driver with $($fallback[0].Name) instead."
+        $overrides += "/p:V143PropsFile=$(Join-Path $fallback[0].FullName 'Toolset.props')"
+        $overrides += "/p:V143TargetsFile=$(Join-Path $fallback[0].FullName 'Toolset.targets')"
+    }
+
+    # Driver projects default to Spectre-mitigated libraries. Report the missing
+    # component instead of failing with MSB8040, and keep local test builds
+    # possible on a host that never installed it.
+    $spectre = @(Get-ChildItem -Path (Join-Path $msbuildRoot.Parent.FullName 'VC\Tools\MSVC') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "lib\spectre\$Platform") -PathType Container })
+    if ($spectre.Count -eq 0) {
+        Write-Warning 'Spectre-mitigated libraries are not installed; building the driver without Spectre mitigation. Install them before producing a release package.'
+        $overrides += '/p:SpectreMitigation=false'
+    }
+
+    return $overrides
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $driverProject = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.vcxproj'
 $deviceSetupProject = Join-Path $repoRoot 'tools/device_setup/VibeshineVhfGamepadDeviceSetup.vcxproj'
@@ -93,11 +181,20 @@ if ([string]::IsNullOrWhiteSpace($PackageDir)) {
     $PackageDir = Join-Path $repoRoot "artifacts/vhf-gamepad-$Platform-$Configuration-$safeDriverVer"
 }
 
+$kitVersion = '10.0.26100.0'
+$driverOverrides = Get-DriverProjectOverrides -MSBuildPath $msbuild -Platform $Platform -KitVersion $kitVersion
+
 foreach ($project in @($driverProject, $deviceSetupProject)) {
     if (-not (Test-Path -LiteralPath $project -PathType Leaf)) {
         throw "Build project is missing: $project"
     }
-    & $msbuild $project '/t:Build' "/p:Configuration=$Configuration" "/p:Platform=$Platform" '/m'
+    # Only the UMDF driver project goes through the WDK toolset, so only it
+    # needs the host-compatibility overrides.
+    $projectArguments = @($project, '/t:Build', "/p:Configuration=$Configuration", "/p:Platform=$Platform", '/m')
+    if ($project -eq $driverProject) {
+        $projectArguments += $driverOverrides
+    }
+    & $msbuild @projectArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Build failed for '$project' with exit code $LASTEXITCODE."
     }
