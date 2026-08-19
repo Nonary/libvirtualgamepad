@@ -15,7 +15,11 @@
 
 namespace lvg {
 
-inline constexpr std::uint16_t k_protocol_version = 1;
+// Version 2 widened the feedback payload: a DualSense adaptive-trigger update
+// is 23 bytes and could not be expressed in version 1's 16-byte payload, and
+// splitting it across events would lose data to the driver's single pending
+// feedback slot. A version mismatch is rejected rather than reinterpreted.
+inline constexpr std::uint16_t k_protocol_version = 2;
 inline constexpr std::uint32_t k_max_controllers = 16;
 
 // This is the source device's private control interface, never the HID child
@@ -83,6 +87,18 @@ enum class feedback_type : std::uint16_t {
   // feedback slot per controller, so body and trigger rumble have to travel
   // together or one of them would be dropped by coalescing.
   xbox_rumble = 4,
+  // A PlayStation output report: rumble, lightbar, and (DualSense only) the
+  // adaptive trigger programs, player LEDs, and microphone LED. One report
+  // carries all of it, so one event does too.
+  playstation_output = 5,
+};
+
+// DualSense adaptive trigger modes, as the console's output report encodes them.
+enum class trigger_effect_mode : std::uint8_t {
+  off = 0x00,
+  feedback = 0x01,
+  weapon = 0x02,
+  vibration = 0x06,
 };
 
 using profile_mask_t = std::uint32_t;
@@ -154,6 +170,30 @@ struct input_state_request {
   std::uint16_t reserved;
 };
 
+// Touch lifecycle, matching Vibeshine's normalized touch events.
+enum class touch_event : std::uint8_t {
+  hover = 0,
+  down = 1,
+  up = 2,
+  move = 3,
+  cancel = 4,
+  cancel_all = 5,
+};
+
+enum class motion_kind : std::uint8_t {
+  accelerometer = 1,
+  gyroscope = 2,
+};
+
+enum class battery_state : std::uint8_t {
+  unknown = 0,
+  not_present = 1,
+  discharging = 2,
+  charging = 3,
+  full = 4,
+  not_charging = 5,
+};
+
 // Coordinates and pressure are normalized to 0..65535 by the client adapter.
 // contact_index is a profile-independent logical contact, not a platform
 // pointer identifier.
@@ -205,6 +245,33 @@ struct xbox_rumble_feedback {
   std::uint16_t right_trigger;
 };
 
+// Mirrors Vibeshine's adaptive-trigger feedback message so the adapter is a
+// field copy. `parameters` is the raw effect program for that trigger.
+struct trigger_effect_feedback {
+  std::uint8_t mode;
+  std::uint8_t parameters[10];
+};
+
+struct playstation_output_feedback {
+  std::uint16_t low_frequency;
+  std::uint16_t high_frequency;
+  std::uint8_t red;
+  std::uint8_t green;
+  std::uint8_t blue;
+  // Bit 0 lightbar valid, bit 1 triggers valid, bit 2 player LEDs valid,
+  // bit 3 microphone LED valid. A DualShock 4 only ever sets the first.
+  std::uint8_t valid;
+  std::uint8_t player_leds;
+  std::uint8_t microphone_led;
+  trigger_effect_feedback left_trigger;
+  trigger_effect_feedback right_trigger;
+};
+
+inline constexpr std::uint8_t ps_output_lightbar_valid = 0x01;
+inline constexpr std::uint8_t ps_output_triggers_valid = 0x02;
+inline constexpr std::uint8_t ps_output_player_leds_valid = 0x04;
+inline constexpr std::uint8_t ps_output_microphone_led_valid = 0x08;
+
 struct raw_hid_report_feedback {
   raw_hid_operation operation;
   std::uint8_t report_id;
@@ -218,7 +285,7 @@ struct feedback_event {
   std::uint32_t controller_id;
   feedback_type type;
   std::uint16_t payload_size;
-  std::uint8_t payload[16];
+  std::uint8_t payload[32];
 };
 
 #pragma pack(pop)
@@ -235,7 +302,11 @@ static_assert(sizeof(battery_state_request) == 16);
 static_assert(sizeof(generic_rumble_rgb_feedback) == 8);
 static_assert(sizeof(xbox_rumble_feedback) == 8);
 static_assert(sizeof(raw_hid_report_feedback) == 16);
-static_assert(sizeof(feedback_event) == 32);
+static_assert(sizeof(trigger_effect_feedback) == 11);
+static_assert(sizeof(playstation_output_feedback) == 32);
+// Exactly fills the payload; anything larger needs another version bump.
+static_assert(sizeof(playstation_output_feedback) <= sizeof(feedback_event::payload));
+static_assert(sizeof(feedback_event) == 48);
 
 inline constexpr DWORD ioctl_query_info =
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA);

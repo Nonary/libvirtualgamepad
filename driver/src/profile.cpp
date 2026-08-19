@@ -4,6 +4,8 @@
 #include "profile.h"
 
 #include "pid_ff.h"
+#include "dualsense.h"
+#include "dualshock4.h"
 #include "xbox_series.h"
 
 #include <cstring>
@@ -114,6 +116,36 @@ constexpr profile_definition k_generic_profile {
   return definition;
 }
 
+// The PlayStation profiles are HID-native: Windows, SDL, and Steam speak to a
+// real DualShock 4 or DualSense as a HID device, so the identity travels with
+// the device's report shape, touchpad, motion, battery, lightbar, and the
+// feature reports its host-side initialization reads.
+[[nodiscard]] const profile_definition &dualshock4_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::dualshock_4;
+    value.report_descriptor = ds4_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_ds4_vendor_id;
+    value.product_id = k_ds4_product_id;
+    value.version_number = k_ds4_version;
+    return value;
+  }();
+  return definition;
+}
+
+[[nodiscard]] const profile_definition &dualsense_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::dualsense;
+    value.report_descriptor = ds5_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_ds5_vendor_id;
+    value.product_id = k_ds5_product_id;
+    value.version_number = k_ds5_version;
+    return value;
+  }();
+  return definition;
+}
+
 [[nodiscard]] const profile_definition &generic_pid_profile() noexcept {
   static const profile_definition definition = [] {
     profile_definition value {};
@@ -193,7 +225,9 @@ const profile_definition *find_profile(const profile id) noexcept {
     case profile::xbox_360:
     case profile::xbox_one:
     case profile::dualshock_4:
+      return &dualshock4_profile();
     case profile::dualsense:
+      return &dualsense_profile();
     case profile::switch_pro:
       return nullptr;
   }

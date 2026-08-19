@@ -95,12 +95,16 @@
 
   <ItemGroup>
     <ClCompile Include="src\driver.cpp" />
+    <ClCompile Include="src\dualsense.cpp" />
+    <ClCompile Include="src\dualshock4.cpp" />
     <ClCompile Include="src\pid_ff.cpp" />
     <ClCompile Include="src\profile.cpp" />
     <ClCompile Include="src\xbox_series.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\libvirtualgamepad\protocol.h" />
+    <ClInclude Include="src\dualsense.h" />
+    <ClInclude Include="src\dualshock4.h" />
     <ClInclude Include="src\pid_ff.h" />
     <ClInclude Include="src\profile.h" />
     <ClInclude Include="src\xbox_series.h" />

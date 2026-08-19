@@ -16,6 +16,8 @@
 #include <cstring>
 
 #include "libvirtualgamepad/protocol.h"
+#include "dualsense.h"
+#include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
 #include "xbox_series.h"
@@ -61,6 +63,14 @@ struct controller_slot {
   bool force_feedback;
   bool pid_rumble_valid;
   pid_rumble_t pid_rumble;
+  // A PlayStation report carries buttons, motion, touch, and battery together,
+  // so each arrives on its own IOCTL and is folded into one accumulated state.
+  // The last input state is kept so a touch or motion update can rebuild and
+  // resend the whole report, the way real hardware streams it.
+  bool have_last_input;
+  lvg::input_state_request last_input;
+  lvg::driver::ds4_state ds4;
+  lvg::driver::ds5_state ds5;
   // Zeroed by reset_slot and initialized by create_controller: WDF allocates
   // the device context as raw memory, so no constructor runs for this member.
   pid_engine pid;
@@ -96,6 +106,10 @@ EVT_VHF_ASYNC_OPERATION evt_vhf_get_feature;
 EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
 EVT_WDF_TIMER evt_pid_tick;
+
+// Defined below with the PlayStation submit helpers; create_controller needs it
+// to decide whether to register the feature-report callbacks.
+[[nodiscard]] bool is_playstation(lvg::profile profile) noexcept;
 
 void lock_context(device_context *const context) noexcept {
   WdfWaitLockAcquire(context->state_lock, nullptr);
@@ -272,6 +286,10 @@ void destroy_owned_controller(
   // reset_slot zeroed this storage, so the engine has to be put into its
   // documented initial state explicitly before any report can reach it.
   slot.pid.reset();
+  slot.have_last_input = false;
+  slot.last_input = {};
+  slot.ds4.reset();
+  slot.ds5.reset();
   unlock_context(context);
 
   // The start path already opens this target. Retrying here keeps a source
@@ -315,9 +333,10 @@ void destroy_owned_controller(
     config.HardwareIDs = const_cast<PWSTR>(definition->hardware_ids);
     config.HardwareIDsLength = static_cast<USHORT>(definition->hardware_ids_bytes);
   }
-  if (definition->force_feedback) {
-    // DirectInput discovers effect capacity and allocates effect blocks through
-    // feature reports, so a PID profile is not usable without these.
+  if (definition->force_feedback || is_playstation(definition->id)) {
+    // DirectInput discovers effect capacity through feature reports, and a
+    // PlayStation controller is only recognized as one by hosts that can read
+    // its calibration, pairing, and firmware features.
     config.EvtVhfAsyncOperationGetFeature = evt_vhf_get_feature;
     config.EvtVhfAsyncOperationSetFeature = evt_vhf_set_feature;
   }
@@ -383,6 +402,168 @@ void destroy_owned_controller(
   return STATUS_SUCCESS;
 }
 
+// True when the profile folds touch, motion, and battery into its input report.
+[[nodiscard]] bool is_playstation(const lvg::profile profile) noexcept {
+  return profile == lvg::profile::dualshock_4 || profile == lvg::profile::dualsense;
+}
+
+// Rebuilds and submits a PlayStation input report from the accumulated state.
+// The caller owns the lifetime gate and must not hold state_lock.
+[[nodiscard]] NTSTATUS submit_playstation_report(
+  device_context *const context,
+  controller_slot &slot) noexcept {
+  using namespace lvg::driver;
+
+  lock_context(context);
+  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+    unlock_context(context);
+    return STATUS_DEVICE_NOT_READY;
+  }
+
+  // A report is only meaningful once the client has sent at least one input
+  // state; before that there are no stick or button values to carry.
+  if (!slot.have_last_input) {
+    unlock_context(context);
+    return STATUS_SUCCESS;
+  }
+
+  const VHFHANDLE vhf = slot.vhf;
+  HID_XFER_PACKET transfer {};
+  ds4_input_report ds4_report {};
+  ds5_input_report ds5_report {};
+
+  if (slot.selected_profile == lvg::profile::dualshock_4) {
+    ds4_report = encode_ds4_input(slot.last_input, &slot.ds4);
+    transfer.reportBuffer = reinterpret_cast<PUCHAR>(&ds4_report);
+    transfer.reportBufferLen = sizeof(ds4_report);
+    transfer.reportId = k_ds4_input_report_id;
+  } else {
+    ds5_report = encode_ds5_input(slot.last_input, &slot.ds5);
+    transfer.reportBuffer = reinterpret_cast<PUCHAR>(&ds5_report);
+    transfer.reportBufferLen = sizeof(ds5_report);
+    transfer.reportId = k_ds5_input_report_id;
+  }
+  unlock_context(context);
+
+  return VhfReadReportSubmit(vhf, &transfer);
+}
+
+// Shared preamble for the touch, motion, and battery IOCTLs: validate the
+// controller and ownership, then hand back the slot for the profile to fold the
+// event into. Returns STATUS_SUCCESS when *slot_out is usable.
+[[nodiscard]] NTSTATUS begin_state_update(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const std::uint32_t controller_id,
+  controller_slot **const slot_out) noexcept {
+  if (controller_id >= lvg::k_max_controllers) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  auto &slot = context->controllers[controller_id];
+  lock_context(context);
+  const bool usable = !context->stopping && is_owned_by(slot, owner) &&
+                      slot.state == slot_state::active && slot.vhf != nullptr;
+  const lvg::profile profile = slot.selected_profile;
+  unlock_context(context);
+
+  if (!usable) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (!is_playstation(profile)) {
+    // Only the PlayStation profiles have a touchpad, motion sensors, and a
+    // battery to report against.
+    return STATUS_NOT_SUPPORTED;
+  }
+
+  *slot_out = &slot;
+  return STATUS_SUCCESS;
+}
+
+[[nodiscard]] NTSTATUS submit_touch_state(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::touch_state_request &request) noexcept {
+  controller_slot *slot = nullptr;
+  lock_lifetime(context);
+  NTSTATUS status = begin_state_update(context, owner, request.controller_id, &slot);
+  if (!NT_SUCCESS(status)) {
+    unlock_lifetime(context);
+    return status;
+  }
+
+  lock_context(context);
+  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
+                         ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
+                         : lvg::driver::apply_ds5_touch(request, &slot->ds5);
+  unlock_context(context);
+
+  if (!applied) {
+    unlock_lifetime(context);
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  status = submit_playstation_report(context, *slot);
+  unlock_lifetime(context);
+  return status;
+}
+
+[[nodiscard]] NTSTATUS submit_motion_state(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::motion_state_request &request) noexcept {
+  controller_slot *slot = nullptr;
+  lock_lifetime(context);
+  NTSTATUS status = begin_state_update(context, owner, request.controller_id, &slot);
+  if (!NT_SUCCESS(status)) {
+    unlock_lifetime(context);
+    return status;
+  }
+
+  lock_context(context);
+  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
+                         ? lvg::driver::apply_ds4_motion(request, &slot->ds4)
+                         : lvg::driver::apply_ds5_motion(request, &slot->ds5);
+  unlock_context(context);
+
+  if (!applied) {
+    unlock_lifetime(context);
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  status = submit_playstation_report(context, *slot);
+  unlock_lifetime(context);
+  return status;
+}
+
+[[nodiscard]] NTSTATUS submit_battery_state(
+  device_context *const context,
+  const WDFFILEOBJECT owner,
+  const lvg::battery_state_request &request) noexcept {
+  controller_slot *slot = nullptr;
+  lock_lifetime(context);
+  NTSTATUS status = begin_state_update(context, owner, request.controller_id, &slot);
+  if (!NT_SUCCESS(status)) {
+    unlock_lifetime(context);
+    return status;
+  }
+
+  lock_context(context);
+  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
+                         ? lvg::driver::apply_ds4_battery(request, &slot->ds4)
+                         : lvg::driver::apply_ds5_battery(request, &slot->ds5);
+  unlock_context(context);
+
+  if (!applied) {
+    unlock_lifetime(context);
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  status = submit_playstation_report(context, *slot);
+  unlock_lifetime(context);
+  return status;
+}
+
 [[nodiscard]] NTSTATUS submit_input_state(
   device_context *const context,
   const WDFFILEOBJECT owner,
@@ -403,6 +584,15 @@ void destroy_owned_controller(
     unlock_lifetime(context);
     return STATUS_DEVICE_NOT_READY;
   }
+  if (is_playstation(slot.selected_profile)) {
+    slot.last_input = request;
+    slot.have_last_input = true;
+    unlock_context(context);
+    const NTSTATUS ps_status = submit_playstation_report(context, slot);
+    unlock_lifetime(context);
+    return ps_status;
+  }
+
   if (slot.selected_profile == lvg::profile::xbox_series) {
     const lvg::driver::xbox_series_input_report xbox_report =
       lvg::driver::encode_xbox_series_input(request);
@@ -613,6 +803,48 @@ void evt_vhf_write_report(
   bool arm_tick = false;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_playstation(slot->selected_profile)) {
+    using namespace lvg::driver;
+
+    auto *const context = slot->parent;
+    lvg::playstation_output_feedback feedback {};
+    bool decoded = false;
+
+    if (slot->selected_profile == lvg::profile::dualshock_4) {
+      ds4_output_report output {};
+      if (transfer->reportBuffer != nullptr &&
+          transfer->reportBufferLen >= sizeof(output)) {
+        std::memcpy(&output, transfer->reportBuffer, sizeof(output));
+        decoded = decode_ds4_output(output, &feedback);
+      }
+    } else {
+      ds5_output_report output {};
+      if (transfer->reportBuffer != nullptr &&
+          transfer->reportBufferLen >= sizeof(output)) {
+        std::memcpy(&output, transfer->reportBuffer, sizeof(output));
+        decoded = decode_ds5_output(output, &feedback);
+      }
+    }
+
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else if (!decoded) {
+      status = STATUS_INVALID_PARAMETER;
+    } else {
+      slot->feedback = encode_playstation_feedback(slot->controller_id, feedback);
+      slot->feedback_pending = true;  // Coalesce to the current actuator state.
+      status = STATUS_SUCCESS;
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->selected_profile == lvg::profile::xbox_series) {
     auto *const context = slot->parent;
     lock_context(context);
@@ -696,6 +928,27 @@ void evt_vhf_get_feature(
 
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      is_playstation(slot->selected_profile) && transfer->reportBuffer != nullptr) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      const std::size_t written =
+        slot->selected_profile == lvg::profile::dualshock_4
+          ? fill_ds4_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen)
+          : fill_ds5_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen);
+      status = written != 0 ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->force_feedback && transfer->reportBuffer != nullptr) {
@@ -876,7 +1129,12 @@ void evt_io_device_control(
         output->minimum_protocol_version = lvg::k_protocol_version;
         output->maximum_protocol_version = lvg::k_protocol_version;
         output->available_profiles = lvg::driver::available_profiles();
-        output->available_features = lvg::feature_input_state | lvg::feature_feedback;
+        // Advertised device-wide; a profile without a touchpad, motion
+        // sensors, or a battery answers those IOCTLs with STATUS_NOT_SUPPORTED.
+        output->available_features = lvg::feature_input_state | lvg::feature_feedback |
+                                     lvg::feature_touch | lvg::feature_motion |
+                                     lvg::feature_battery |
+                                     lvg::feature_hid_feature_reports;
         output->maximum_controllers = lvg::k_max_controllers;
         information = sizeof(*output);
       }
@@ -897,7 +1155,7 @@ void evt_io_device_control(
         status = STATUS_INVALID_PARAMETER;
       }
       if (NT_SUCCESS(status)) {
-        status = STATUS_NOT_SUPPORTED;
+        status = submit_touch_state(context, owner, *input);
       }
       break;
     }
@@ -908,7 +1166,8 @@ void evt_io_device_control(
         const bool reserved_is_zero = input->reserved0[0] == 0 &&
                                       input->reserved0[1] == 0 &&
                                       input->reserved0[2] == 0;
-        status = reserved_is_zero ? STATUS_NOT_SUPPORTED : STATUS_INVALID_PARAMETER;
+        status = reserved_is_zero ? submit_motion_state(context, owner, *input)
+                                  : STATUS_INVALID_PARAMETER;
       }
       break;
     }
@@ -919,7 +1178,7 @@ void evt_io_device_control(
         status = STATUS_INVALID_PARAMETER;
       }
       if (NT_SUCCESS(status)) {
-        status = STATUS_NOT_SUPPORTED;
+        status = submit_battery_state(context, owner, *input);
       }
       break;
     }

@@ -12,6 +12,8 @@
 //   g++ -std=c++20 -I driver/src -I include
 //     driver/tests/test_pid_descriptor.cpp driver/src/pid_ff.cpp -o pid_test
 
+#include "dualsense.h"
+#include "dualshock4.h"
 #include "pid_ff.h"
 #include "xbox_series.h"
 
@@ -576,6 +578,283 @@ int main() {
     check(event.controller_id == 5, "feedback carries the controller id");
     check(event.payload_size == sizeof(lvg::xbox_rumble_feedback), "feedback payload size");
     check(valid_request(&event, sizeof(event)), "feedback event is a valid protocol message");
+  }
+
+
+  // ---- PlayStation profiles ----
+  {
+    struct ps_case {
+      const char *name;
+      const std::uint8_t *descriptor;
+      std::size_t size;
+      std::uint8_t input_id;
+      std::size_t input_bytes;
+      std::uint8_t output_id;
+      std::size_t output_bytes;
+    };
+
+    std::size_t ds4_size = 0;
+    std::size_t ds5_size = 0;
+    const std::uint8_t *const ds4 = ds4_descriptor(&ds4_size);
+    const std::uint8_t *const ds5 = ds5_descriptor(&ds5_size);
+
+    const ps_case cases[] = {
+      {"ds4", ds4, ds4_size, k_ds4_input_report_id, sizeof(ds4_input_report),
+       k_ds4_output_report_id, sizeof(ds4_output_report)},
+      {"ds5", ds5, ds5_size, k_ds5_input_report_id, sizeof(ds5_input_report),
+       k_ds5_output_report_id, sizeof(ds5_output_report)},
+    };
+
+    for (const ps_case &c : cases) {
+      const walk_result_t parsed_ps = walk(c.descriptor, c.size);
+      const std::string tag = std::string(c.name) + ": ";
+      check(parsed_ps.well_formed, tag + "descriptor parses: " + parsed_ps.error);
+      if (!parsed_ps.well_formed) {
+        continue;
+      }
+      check(parsed_ps.collection_depth == 0, tag + "collections balance");
+      std::printf("%s descriptor: %zu bytes, %zu items, %zu report ids\n",
+                  c.name, c.size, parsed_ps.item_count, parsed_ps.reports.size());
+
+      const auto in = parsed_ps.reports.find(c.input_id);
+      if (in == parsed_ps.reports.end()) {
+        check(false, tag + "input report present");
+      } else {
+        check(in->second.input / 8 + 1 == c.input_bytes,
+              tag + "input report is " + std::to_string(c.input_bytes) + " bytes, descriptor says " +
+                std::to_string(in->second.input / 8 + 1));
+      }
+
+      const auto out = parsed_ps.reports.find(c.output_id);
+      if (out == parsed_ps.reports.end()) {
+        check(false, tag + "output report present");
+      } else {
+        check(out->second.output / 8 + 1 == c.output_bytes,
+              tag + "output report is " + std::to_string(c.output_bytes) + " bytes, descriptor says " +
+                std::to_string(out->second.output / 8 + 1));
+      }
+    }
+  }
+
+  {
+    // DualShock 4 input translation.
+    ds4_state state {};
+    state.reset();
+
+    input_state_request input {};
+    input.header.size = sizeof(input);
+    input.header.version = k_protocol_version;
+
+    ds4_input_report report = encode_ds4_input(input, &state);
+    check(report.report_id == k_ds4_input_report_id, "ds4 report id");
+    check(report.left_x == 128, "ds4 centred X");
+    check(report.left_y == 128, "ds4 centred Y");
+    check((report.buttons0 & 0x0F) == 8, "ds4 released d-pad is hat 8");
+
+    input.left_y = 32767;
+    check(encode_ds4_input(input, &state).left_y == 0, "ds4 stick up maps to 0");
+    input.left_y = -32768;
+    check(encode_ds4_input(input, &state).left_y == 255, "ds4 stick down maps to 255");
+    input.left_y = 0;
+
+    input.buttons = button_mask::south;
+    check((encode_ds4_input(input, &state).buttons0 & 0x20) != 0, "ds4 south is Cross");
+    input.buttons = button_mask::west;
+    check((encode_ds4_input(input, &state).buttons0 & 0x10) != 0, "ds4 west is Square");
+    input.buttons = button_mask::north;
+    check((encode_ds4_input(input, &state).buttons0 & 0x80) != 0, "ds4 north is Triangle");
+    input.buttons = button_mask::east;
+    check((encode_ds4_input(input, &state).buttons0 & 0x40) != 0, "ds4 east is Circle");
+    input.buttons = button_mask::dpad_up;
+    check((encode_ds4_input(input, &state).buttons0 & 0x0F) == 0, "ds4 up is hat 0");
+    input.buttons = button_mask::home;
+    check((encode_ds4_input(input, &state).buttons2 & 0x01) != 0, "ds4 home is PS");
+    input.buttons = button_mask::touchpad;
+    check((encode_ds4_input(input, &state).buttons2 & 0x02) != 0, "ds4 touchpad click");
+    input.buttons = 0;
+
+    // A pressed trigger also sets the device's digital bit.
+    input.left_trigger = 200;
+    report = encode_ds4_input(input, &state);
+    check(report.left_trigger == 200, "ds4 analog trigger");
+    check((report.buttons1 & 0x04) != 0, "ds4 analog trigger sets its digital bit");
+    input.left_trigger = 0;
+
+    // The report counter has to advance or consumers treat the device as stalled.
+    const std::uint8_t first = static_cast<std::uint8_t>(encode_ds4_input(input, &state).buttons2 >> 2);
+    const std::uint8_t second = static_cast<std::uint8_t>(encode_ds4_input(input, &state).buttons2 >> 2);
+    check(first != second, "ds4 report counter advances");
+  }
+
+  {
+    // DualShock 4 touch, motion, and battery folding.
+    ds4_state state {};
+    state.reset();
+
+    input_state_request input {};
+    input.header.size = sizeof(input);
+    input.header.version = k_protocol_version;
+
+    touch_state_request touch {};
+    touch.header.size = sizeof(touch);
+    touch.header.version = k_protocol_version;
+    touch.contact_index = 0;
+    touch.event_type = static_cast<std::uint8_t>(touch_event::down);
+    touch.x = 65535;
+    touch.y = 0;
+    check(apply_ds4_touch(touch, &state), "ds4 touch down accepted");
+
+    ds4_input_report report = encode_ds4_input(input, &state);
+    check((report.touch[0].points[0].tracking_id & 0x80) == 0, "ds4 contact reads as active");
+    const std::uint16_t x = static_cast<std::uint16_t>(
+      report.touch[0].points[0].coordinates[0] |
+      ((report.touch[0].points[0].coordinates[1] & 0x0F) << 8));
+    check(x == k_ds4_touch_width - 1, "ds4 touch x maps to the pad width, got " + std::to_string(x));
+
+    touch.event_type = static_cast<std::uint8_t>(touch_event::up);
+    check(apply_ds4_touch(touch, &state), "ds4 touch up accepted");
+    report = encode_ds4_input(input, &state);
+    check((report.touch[0].points[0].tracking_id & 0x80) != 0, "ds4 released contact reads inactive");
+
+    // A third contact has nowhere to go on a two-contact pad.
+    touch.contact_index = 2;
+    touch.event_type = static_cast<std::uint8_t>(touch_event::down);
+    check(!apply_ds4_touch(touch, &state), "ds4 rejects a third contact");
+
+    motion_state_request motion {};
+    motion.header.size = sizeof(motion);
+    motion.header.version = k_protocol_version;
+    motion.motion_type = static_cast<std::uint8_t>(motion_kind::accelerometer);
+    motion.y_milli = k_milli_g;
+    check(apply_ds4_motion(motion, &state), "ds4 accelerometer accepted");
+    report = encode_ds4_input(input, &state);
+    check(report.accel_y == k_ds4_accel_counts_per_g,
+          "ds4 one gravity is one G of counts, got " + std::to_string(report.accel_y));
+
+    motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+    motion.x_milli = 1000;  // 1 degree/second
+    motion.y_milli = 0;
+    check(apply_ds4_motion(motion, &state), "ds4 gyroscope accepted");
+    report = encode_ds4_input(input, &state);
+    check(report.gyro_x == k_ds4_gyro_counts_per_dps, "ds4 gyro scaling");
+
+    battery_state_request battery {};
+    battery.header.size = sizeof(battery);
+    battery.header.version = k_protocol_version;
+    battery.percent = 100;
+    battery.flags = static_cast<std::uint8_t>(lvg::battery_state::discharging);
+    check(apply_ds4_battery(battery, &state), "ds4 battery accepted");
+    report = encode_ds4_input(input, &state);
+    check(report.battery == 10, "ds4 full battery on battery power is 10");
+    check((report.battery_status & 0x10) == 0, "ds4 discharging is not cable powered");
+
+    battery.flags = static_cast<std::uint8_t>(lvg::battery_state::charging);
+    check(apply_ds4_battery(battery, &state), "ds4 charging accepted");
+    report = encode_ds4_input(input, &state);
+    check((report.battery_status & 0x10) != 0, "ds4 charging sets the cable bit");
+  }
+
+  {
+    // DualShock 4 output: rumble and lightbar.
+    ds4_output_report output {};
+    output.report_id = k_ds4_output_report_id;
+    output.flags = 0x03;
+    output.left_rumble = 0xFF;
+    output.right_rumble = 0x80;
+    output.red = 0x11;
+    output.green = 0x22;
+    output.blue = 0x33;
+
+    playstation_output_feedback feedback {};
+    check(decode_ds4_output(output, &feedback), "ds4 output decodes");
+    check(feedback.low_frequency == 0xFF00, "ds4 left motor widens to 16 bits");
+    check(feedback.high_frequency == 0x8000, "ds4 right motor widens to 16 bits");
+    check(feedback.red == 0x11 && feedback.green == 0x22 && feedback.blue == 0x33, "ds4 lightbar");
+    check((feedback.valid & ps_output_lightbar_valid) != 0, "ds4 lightbar marked valid");
+
+    // A report that does not claim the lightbar must not recolour it.
+    output.flags = 0x01;
+    check(decode_ds4_output(output, &feedback), "ds4 rumble-only output decodes");
+    check((feedback.valid & ps_output_lightbar_valid) == 0, "ds4 lightbar not claimed");
+
+    output.report_id = 0x7E;
+    check(!decode_ds4_output(output, &feedback), "ds4 rejects a foreign report id");
+
+    std::uint8_t buffer[64] {};
+    check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, sizeof(buffer)) == 36,
+          "ds4 calibration feature is 36 bytes");
+    check(buffer[0] == k_ds4_feature_calibration_id, "ds4 calibration carries its report id");
+    check(fill_ds4_feature(k_ds4_feature_firmware_id, buffer, sizeof(buffer)) == 49,
+          "ds4 firmware feature is 49 bytes");
+    check(fill_ds4_feature(k_ds4_feature_pairing_id, buffer, sizeof(buffer)) == 16,
+          "ds4 pairing feature is 16 bytes");
+    // Locally administered, so it cannot collide with a real Sony address.
+    check((buffer[1] & 0x02) != 0, "ds4 MAC is locally administered");
+    check(fill_ds4_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds4 ignores unknown features");
+    check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, 4) == 0,
+          "ds4 refuses a short feature buffer");
+  }
+
+  {
+    // DualSense: the pieces that differ from the DualShock 4.
+    ds5_state state {};
+    state.reset();
+
+    input_state_request input {};
+    input.header.size = sizeof(input);
+    input.header.version = k_protocol_version;
+    input.buttons = button_mask::misc;
+    const ds5_input_report report = encode_ds5_input(input, &state);
+    check(report.report_id == k_ds5_input_report_id, "ds5 report id");
+    check((report.buttons[2] & 0x04) != 0, "ds5 misc is the microphone mute button");
+
+    input.buttons = button_mask::touchpad;
+    check((encode_ds5_input(input, &state).buttons[2] & 0x02) != 0, "ds5 touchpad click");
+
+    ds5_output_report output {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_compatible_vibration | k_ds5_flag0_left_trigger_effect;
+    output.valid_flag1 = k_ds5_flag1_lightbar | k_ds5_flag1_player_indicator;
+    output.motor_left = 0x40;
+    output.motor_right = 0x20;
+    output.lightbar_red = 0xAA;
+    output.player_leds = 0x05;
+    output.left_trigger.mode = static_cast<std::uint8_t>(trigger_effect_mode::weapon);
+    output.left_trigger.parameters[0] = 0x12;
+    output.right_trigger.mode = static_cast<std::uint8_t>(trigger_effect_mode::vibration);
+
+    playstation_output_feedback feedback {};
+    check(decode_ds5_output(output, &feedback), "ds5 output decodes");
+    check(feedback.low_frequency == 0x4000 && feedback.high_frequency == 0x2000, "ds5 rumble");
+    check(feedback.red == 0xAA, "ds5 lightbar");
+    check(feedback.player_leds == 0x05, "ds5 player LEDs");
+    check((feedback.valid & ps_output_player_leds_valid) != 0, "ds5 player LEDs marked valid");
+    check(feedback.left_trigger.mode == static_cast<std::uint8_t>(trigger_effect_mode::weapon),
+          "ds5 left trigger effect");
+    check(feedback.left_trigger.parameters[0] == 0x12, "ds5 left trigger parameters");
+    // The right trigger was not enabled, so its program must not leak through.
+    check(feedback.right_trigger.mode == 0, "ds5 unenabled trigger stays off");
+    check((feedback.valid & ps_output_triggers_valid) != 0, "ds5 triggers marked valid");
+
+    std::uint8_t buffer[80] {};
+    check(fill_ds5_feature(k_ds5_feature_calibration_id, buffer, sizeof(buffer)) == 41,
+          "ds5 calibration feature is 41 bytes");
+    check(fill_ds5_feature(k_ds5_feature_firmware_id, buffer, sizeof(buffer)) == 64,
+          "ds5 firmware feature is 64 bytes");
+    check(fill_ds5_feature(k_ds5_feature_pairing_id, buffer, sizeof(buffer)) == 20,
+          "ds5 pairing feature is 20 bytes");
+    check(fill_ds5_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds5 ignores unknown features");
+  }
+
+  {
+    // The feedback event has to survive the protocol's own validation.
+    playstation_output_feedback feedback {};
+    feedback.low_frequency = 0x1234;
+    const feedback_event event = encode_playstation_feedback(7, feedback);
+    check(event.type == feedback_type::playstation_output, "ps feedback tagged");
+    check(event.controller_id == 7, "ps feedback controller id");
+    check(event.payload_size == sizeof(feedback), "ps feedback payload size");
+    check(valid_request(&event, sizeof(event)), "ps feedback is a valid protocol message");
   }
 
   if (g_failures == 0) {
