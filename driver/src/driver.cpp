@@ -18,6 +18,7 @@
 #include "libvirtualgamepad/protocol.h"
 #include "pid_ff.h"
 #include "profile.h"
+#include "xbox_series.h"
 
 namespace {
 
@@ -307,6 +308,13 @@ void destroy_owned_controller(
   config.VendorID = definition->vendor_id;
   config.ProductID = definition->product_id;
   config.VersionNumber = definition->version_number;
+  if (definition->hardware_ids != nullptr && definition->hardware_ids_bytes != 0) {
+    // Windows attaches xinputhid.sys by hardware ID, so this is what puts the
+    // child on the XInput path. It is set at runtime and never appears in the
+    // signed INF.
+    config.HardwareIDs = const_cast<PWSTR>(definition->hardware_ids);
+    config.HardwareIDsLength = static_cast<USHORT>(definition->hardware_ids_bytes);
+  }
   if (definition->force_feedback) {
     // DirectInput discovers effect capacity and allocates effect blocks through
     // feature reports, so a PID profile is not usable without these.
@@ -395,7 +403,24 @@ void destroy_owned_controller(
     unlock_lifetime(context);
     return STATUS_DEVICE_NOT_READY;
   }
-  if (slot.selected_profile != lvg::profile::generic_hid) {
+  if (slot.selected_profile == lvg::profile::xbox_series) {
+    const lvg::driver::xbox_series_input_report xbox_report =
+      lvg::driver::encode_xbox_series_input(request);
+    HID_XFER_PACKET xbox_transfer {
+      reinterpret_cast<PUCHAR>(const_cast<lvg::driver::xbox_series_input_report *>(&xbox_report)),
+      sizeof(xbox_report),
+      lvg::driver::k_xbox_series_input_report_id,
+    };
+
+    const VHFHANDLE xbox_vhf = slot.vhf;
+    unlock_context(context);
+    const NTSTATUS xbox_status = VhfReadReportSubmit(xbox_vhf, &xbox_transfer);
+    unlock_lifetime(context);
+    return xbox_status;
+  }
+
+  if (slot.selected_profile != lvg::profile::generic_hid &&
+      slot.selected_profile != lvg::profile::generic_pid) {
     unlock_context(context);
     unlock_lifetime(context);
     return STATUS_NOT_SUPPORTED;
@@ -553,6 +578,31 @@ void publish_pid_rumble(controller_slot *const slot) noexcept {
   slot->feedback_pending = true;
 }
 
+// Applies an Xbox rumble write. The caller owns state_lock.
+[[nodiscard]] NTSTATUS apply_xbox_output(
+  controller_slot *const slot,
+  const PHID_XFER_PACKET transfer) noexcept {
+  using namespace lvg::driver;
+
+  if (transfer->reportId != k_xbox_series_output_report_id ||
+      transfer->reportBuffer == nullptr ||
+      transfer->reportBufferLen < sizeof(xbox_series_output_report)) {
+    return STATUS_INVALID_DEVICE_REQUEST;
+  }
+
+  xbox_series_output_report output {};
+  std::memcpy(&output, transfer->reportBuffer, sizeof(output));
+
+  lvg::xbox_rumble_feedback rumble {};
+  if (!decode_xbox_series_output(output, &rumble)) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  slot->feedback = encode_xbox_series_feedback(slot->controller_id, rumble);
+  slot->feedback_pending = true;  // Coalesce to the current actuator state.
+  return STATUS_SUCCESS;
+}
+
 void evt_vhf_write_report(
   PVOID vhf_client_context,
   VHFOPERATIONHANDLE operation_handle,
@@ -561,6 +611,23 @@ void evt_vhf_write_report(
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
   bool arm_tick = false;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->selected_profile == lvg::profile::xbox_series) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (!context->stopping && slot->state == slot_state::active) {
+      status = apply_xbox_output(slot, transfer);
+    } else {
+      status = STATUS_DEVICE_NOT_READY;
+    }
+    unlock_context(context);
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->force_feedback && transfer->reportId != k_generic_output_report_id) {

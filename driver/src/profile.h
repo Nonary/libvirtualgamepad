@@ -57,6 +57,11 @@ struct profile_definition {
   // True when the profile publishes the DirectInput PID report set and its
   // output and feature reports must be routed to the force-feedback engine.
   bool force_feedback;
+  // Optional REG_MULTI_SZ hardware ID list for the VHF child. Windows attaches
+  // xinputhid.sys by hardware ID, so this is what puts a profile on the XInput
+  // path. Null leaves VHF to synthesize the child's IDs.
+  const wchar_t *hardware_ids;
+  std::size_t hardware_ids_bytes;
 };
 
 // Returns nullptr until a profile has passed descriptor, output, and

@@ -13,6 +13,7 @@
 //     driver/tests/test_pid_descriptor.cpp driver/src/pid_ff.cpp -o pid_test
 
 #include "pid_ff.h"
+#include "xbox_series.h"
 
 #include <cstdio>
 #include <cstring>
@@ -168,6 +169,7 @@ walk_result_t walk(const std::uint8_t *data, const std::size_t size) {
 }  // namespace
 
 int main() {
+  using namespace lvg;
   using namespace lvg::driver;
 
   std::size_t descriptor_size = 0;
@@ -426,6 +428,154 @@ int main() {
     disable.control = static_cast<std::uint8_t>(pid_device_control::disable_actuators);
     check(engine.device_control(disable), "disable actuators accepted");
     check(engine.rumble().low_frequency == 0, "disabled actuators produce no rumble");
+  }
+
+  // ---- Xbox Series profile ----
+  {
+    std::size_t xbox_size = 0;
+    const std::uint8_t *const xbox = xbox_series_descriptor(&xbox_size);
+    const walk_result_t xbox_parsed = walk(xbox, xbox_size);
+    check(xbox_parsed.well_formed, "xbox descriptor parses: " + xbox_parsed.error);
+    if (xbox_parsed.well_formed) {
+      check(xbox_parsed.collection_depth == 0, "xbox collections balance");
+      check(xbox_parsed.top_level_collections == 1, "xbox has one application collection");
+      std::printf("xbox descriptor: %zu bytes, %zu items, %zu report ids\n",
+                  xbox_size, xbox_parsed.item_count, xbox_parsed.reports.size());
+
+      const auto input = xbox_parsed.reports.find(k_xbox_series_input_report_id);
+      if (input == xbox_parsed.reports.end()) {
+        check(false, "xbox input report exists");
+      } else {
+        check(input->second.input == 128,
+              "xbox input report is 128 bits, got " + std::to_string(input->second.input));
+        check(input->second.input / 8 + 1 == sizeof(xbox_series_input_report),
+              "xbox input report matches its struct");
+      }
+
+      const auto output = xbox_parsed.reports.find(k_xbox_series_output_report_id);
+      if (output == xbox_parsed.reports.end()) {
+        check(false, "xbox output report exists");
+      } else {
+        check(output->second.output == 64,
+              "xbox output report is 64 bits, got " + std::to_string(output->second.output));
+        check(output->second.output / 8 + 1 == sizeof(xbox_series_output_report),
+              "xbox output report matches its struct");
+      }
+    }
+
+    // The hardware ID list is what puts the child on the XInput path, so its
+    // REG_MULTI_SZ shape has to be right or PnP sees nothing.
+    std::size_t id_bytes = 0;
+    const wchar_t *const ids = xbox_series_hardware_ids(&id_bytes);
+    check(ids != nullptr && id_bytes > 0, "hardware ids are present");
+    const std::size_t id_chars = id_bytes / sizeof(wchar_t);
+    check(id_chars >= 2 && ids[id_chars - 1] == L'\0' && ids[id_chars - 2] == L'\0',
+          "hardware ids are double-null terminated");
+    int id_count = 0;
+    for (std::size_t i = 0; i + 1 < id_chars;) {
+      if (ids[i] == L'\0') {
+        break;
+      }
+      ++id_count;
+      while (i < id_chars && ids[i] != L'\0') {
+        ++i;
+      }
+      ++i;
+    }
+    check(id_count == 2, "two hardware ids are offered, got " + std::to_string(id_count));
+  }
+
+  {
+    // Axis, trigger, hat and button translation.
+    input_state_request state {};
+    state.header.size = sizeof(state);
+    state.header.version = k_protocol_version;
+
+    state.left_x = 0;
+    state.left_y = 0;
+    state.right_x = 0;
+    state.right_y = 0;
+    xbox_series_input_report report = encode_xbox_series_input(state);
+    check(report.report_id == k_xbox_series_input_report_id, "xbox report id");
+    check(report.left_x == 32768, "centred X maps to mid scale");
+    check(report.left_y == 32767, "centred Y maps to mid scale");
+    check(report.hat == 0, "a centred d-pad reports the hat null value");
+    check(report.buttons == 0, "no buttons pressed");
+
+    // Vibeshine is positive-up; this device is positive-down.
+    state.left_y = 32767;
+    report = encode_xbox_series_input(state);
+    check(report.left_y == 0, "stick fully up maps to 0");
+    state.left_y = -32768;
+    report = encode_xbox_series_input(state);
+    check(report.left_y == 65535, "stick fully down maps to full scale");
+
+    state.left_y = 0;
+    state.left_trigger = 255;
+    state.right_trigger = 0;
+    report = encode_xbox_series_input(state);
+    check(report.left_trigger == k_xbox_trigger_max, "full trigger maps to 10-bit maximum");
+    check(report.right_trigger == 0, "released trigger is zero");
+
+    state.left_trigger = 0;
+    state.buttons = button_mask::dpad_up;
+    check(encode_xbox_series_input(state).hat == 1, "up is hat 1");
+    state.buttons = button_mask::dpad_up | button_mask::dpad_right;
+    check(encode_xbox_series_input(state).hat == 2, "up-right is hat 2");
+    state.buttons = button_mask::dpad_left;
+    check(encode_xbox_series_input(state).hat == 7, "left is hat 7");
+    state.buttons = button_mask::dpad_up | button_mask::dpad_down;
+    check(encode_xbox_series_input(state).hat == 0, "opposing d-pad reports the null value");
+
+    state.buttons = button_mask::south | button_mask::east | button_mask::west |
+                    button_mask::north;
+    report = encode_xbox_series_input(state);
+    check(report.buttons == (xbox_a | xbox_b | xbox_x | xbox_y), "face buttons map in HID order");
+    // Buttons 3, 6, 9 and 10 are unpopulated on real hardware.
+    check((report.buttons & ((1u << 2) | (1u << 5) | (1u << 8) | (1u << 9))) == 0,
+          "the vendor's unpopulated button gaps stay empty");
+
+    state.buttons = button_mask::home;
+    check(encode_xbox_series_input(state).buttons == xbox_guide, "home maps to Guide");
+    state.buttons = button_mask::misc;
+    check(encode_xbox_series_input(state).share == 1, "misc maps to Share");
+    state.buttons = 0;
+    check(encode_xbox_series_input(state).share == 0, "Share is released");
+  }
+
+  {
+    // Rumble decode: the enable mask gates each actuator.
+    xbox_series_output_report output {};
+    output.report_id = k_xbox_series_output_report_id;
+    output.enable_mask = k_xbox_enable_left_motor | k_xbox_enable_right_motor |
+                         k_xbox_enable_left_trigger | k_xbox_enable_right_trigger;
+    output.left_motor = k_xbox_rumble_max;
+    output.right_motor = k_xbox_rumble_max / 2;
+    output.left_trigger_motor = k_xbox_rumble_max;
+    output.right_trigger_motor = 0;
+
+    lvg::xbox_rumble_feedback rumble {};
+    check(decode_xbox_series_output(output, &rumble), "rumble write decodes");
+    check(rumble.low_frequency == 65535, "full left motor is full scale");
+    check(rumble.high_frequency > 32000 && rumble.high_frequency < 33500,
+          "half right motor is about half scale");
+    check(rumble.left_trigger == 65535, "full left trigger motor is full scale");
+    check(rumble.right_trigger == 0, "idle right trigger motor is zero");
+
+    output.enable_mask = k_xbox_enable_left_motor;
+    check(decode_xbox_series_output(output, &rumble), "masked rumble write decodes");
+    check(rumble.low_frequency == 65535, "the enabled actuator still reports");
+    check(rumble.high_frequency == 0 && rumble.left_trigger == 0,
+          "actuators the mask disables report silence");
+
+    output.report_id = 0x7F;
+    check(!decode_xbox_series_output(output, &rumble), "a foreign report id is rejected");
+
+    const feedback_event event = encode_xbox_series_feedback(5, rumble);
+    check(event.type == feedback_type::xbox_rumble, "feedback is tagged xbox_rumble");
+    check(event.controller_id == 5, "feedback carries the controller id");
+    check(event.payload_size == sizeof(lvg::xbox_rumble_feedback), "feedback payload size");
+    check(valid_request(&event, sizeof(event)), "feedback event is a valid protocol message");
   }
 
   if (g_failures == 0) {

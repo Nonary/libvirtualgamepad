@@ -79,6 +79,10 @@ enum class feedback_type : std::uint16_t {
   // nothing about an LED, and reporting one would make a client turn a real
   // controller's light off every time a game started a force.
   generic_rumble = 3,
+  // All four Xbox actuators in one event. The driver keeps a single pending
+  // feedback slot per controller, so body and trigger rumble have to travel
+  // together or one of them would be dropped by coalescing.
+  xbox_rumble = 4,
 };
 
 using profile_mask_t = std::uint32_t;
@@ -194,6 +198,13 @@ struct generic_rumble_rgb_feedback {
   std::uint8_t reserved;
 };
 
+struct xbox_rumble_feedback {
+  std::uint16_t low_frequency;
+  std::uint16_t high_frequency;
+  std::uint16_t left_trigger;
+  std::uint16_t right_trigger;
+};
+
 struct raw_hid_report_feedback {
   raw_hid_operation operation;
   std::uint8_t report_id;
@@ -222,6 +233,7 @@ static_assert(sizeof(touch_state_request) == 22);
 static_assert(sizeof(motion_state_request) == 28);
 static_assert(sizeof(battery_state_request) == 16);
 static_assert(sizeof(generic_rumble_rgb_feedback) == 8);
+static_assert(sizeof(xbox_rumble_feedback) == 8);
 static_assert(sizeof(raw_hid_report_feedback) == 16);
 static_assert(sizeof(feedback_event) == 32);
 

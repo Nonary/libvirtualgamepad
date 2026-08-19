@@ -4,6 +4,7 @@
 #include "profile.h"
 
 #include "pid_ff.h"
+#include "xbox_series.h"
 
 #include <cstring>
 #include <iterator>
@@ -93,6 +94,26 @@ constexpr profile_definition k_generic_profile {
 //
 // The descriptor lives in another translation unit, so this is built once by a
 // thread-safe local static rather than by mutating a shared definition.
+// Xbox Series. This is the profile that reaches XInput: Windows attaches its
+// inbox xinputhid.sys filter by hardware ID, so a VHF child carrying a matching
+// ID becomes an XInput device without any bus driver. The identity travels with
+// the real report shape, trigger resolution, hat encoding, and rumble payload -
+// it is not a relabelled generic pad.
+[[nodiscard]] const profile_definition &xbox_series_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::xbox_series;
+    value.report_descriptor = xbox_series_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_xbox_vendor_id;
+    value.product_id = k_xbox_series_product_id;
+    value.version_number = k_xbox_series_version;
+    value.force_feedback = false;
+    value.hardware_ids = xbox_series_hardware_ids(&value.hardware_ids_bytes);
+    return value;
+  }();
+  return definition;
+}
+
 [[nodiscard]] const profile_definition &generic_pid_profile() noexcept {
   static const profile_definition definition = [] {
     profile_definition value {};
@@ -163,9 +184,14 @@ const profile_definition *find_profile(const profile id) noexcept {
       return &k_generic_profile;
     case profile::generic_pid:
       return &generic_pid_profile();
+    case profile::xbox_series:
+      return &xbox_series_profile();
+    // A real Xbox 360 pad is an XUSB device on a USB bus. That needs a bus
+    // child, which VHF cannot create, so no descriptor makes this profile
+    // honest. Xbox One is left unavailable until its own report shape and
+    // feature behavior are implemented and tested.
     case profile::xbox_360:
     case profile::xbox_one:
-    case profile::xbox_series:
     case profile::dualshock_4:
     case profile::dualsense:
     case profile::switch_pro:

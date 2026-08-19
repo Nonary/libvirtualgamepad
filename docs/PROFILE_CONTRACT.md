@@ -8,7 +8,10 @@ the acceptance criteria below.
 
 This protects users from a common virtual-controller failure mode: presenting a
 device with a familiar vendor/product ID while its report descriptor, feedback
-behavior, and game compatibility do not actually match that device family.
+behavior, and game compatibility do not actually match that device family. The
+rule is about behavior matching the claim. It is not a prohibition on using a
+family's identifiers when the identity is a necessary part of a complete,
+tested emulation.
 
 ## Initial profile
 
@@ -39,10 +42,26 @@ include all of the following in the same reviewed change:
 
 ## Xbox profiles
 
-VHF publishes HID children. It does not make an HID child an XUSB/XInput or GIP
-endpoint. Consequently `xbox_360`, `xbox_one`, and `xbox_series` remain
-unavailable until the project has a separately validated compatible transport
-and distribution plan. Changing an HID VID/PID does not satisfy this contract.
+VHF publishes HID children, and an HID child is not an XUSB or GIP endpoint.
+That is not the end of the story, because XInput on Windows is reached through
+a filter rather than a bus: `xinputhid.inf` attaches `xinputhid.sys` to HID
+devices matching `HID\VID_045E&PID_xxxx&IG_00`, and `VHF_CONFIG.HardwareIDs`
+lets a VHF child carry such an ID.
+
+`xbox_series` is implemented on that route. It clears this contract because the
+identity ships with the behavior: the native report shape, 10-bit triggers, the
+1-based hat with a null state, the real button gaps, Share as a Consumer Record
+usage, and the four-motor rumble payload with its actuator-enable mask. An
+identity alone would not have cleared it, and a descriptor-only change still
+does not.
+
+`xbox_360` is refused outright. A real Xbox 360 pad is an XUSB device on a USB
+bus, `xusb22.sys` binds to a bus child, and VHF cannot create one, so no
+descriptor makes that profile honest.
+
+`xbox_one` is reachable by the same route as `xbox_series` and stays
+unavailable only until its own report shape and feature behavior are
+implemented and tested.
 
 ## PlayStation and Switch profiles
 

@@ -38,18 +38,25 @@ The target profile set is deliberately explicit:
 | --- | --- |
 | Generic HID | Standard HID Game Pad; implemented first. |
 | Generic HID + PID | The same game pad plus the DirectInput Physical Interface Device report set, so DirectInput reports the device as force-feedback capable. |
-| Xbox 360 | Requires a separately validated XUSB-compatible path. VHF alone is HID, not XInput. |
-| Xbox One | Requires a separately validated XUSB/GIP-compatible path. |
-| Xbox Series | Requires a separately validated XUSB/GIP-compatible path. |
+| Xbox 360 | Not reachable from VHF. A real Xbox 360 pad is an XUSB device on a USB bus, which needs a bus child that VHF cannot create. |
+| Xbox One | Reachable in principle by the same route as Xbox Series; not implemented until its report shape and feature behavior are tested. |
+| Xbox Series | Implemented. Native report shape plus the hardware ID that makes Windows attach its inbox XInput filter. |
 | DualShock 4 | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
 | DualSense | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
 | Switch Pro | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
 
-The repository must not label an HID descriptor as an Xbox, PlayStation, or
-Nintendo device merely by changing a VID/PID. Each profile becomes available
-only after its descriptor, input mapping, output mapping, application behavior,
-and legal provenance have all been tested. This avoids falsely promising
-ViGEm/XInput compatibility from a VHF HID child.
+A profile becomes available only after its descriptor, input mapping, output
+mapping, application behavior, and provenance have all been tested. The bar is
+that the device behaves as the family it claims to be - not that it avoids the
+family's identifiers. Shipping a generic pad wearing somebody else's VID/PID is
+the failure this guards against, because the identity would promise
+compatibility the reports cannot deliver.
+
+Where an identity is a required part of a complete emulation, it is used. Xbox
+Series is the worked example: Windows attaches its inbox `xinputhid.sys` filter
+by hardware ID, so the identity is what puts the device on the XInput path at
+all, and it ships together with the native report shape, trigger resolution,
+hat encoding, and four-motor rumble payload rather than instead of them.
 
 ## Driver package and signing
 
@@ -148,6 +155,23 @@ documented test product ID. That identity is deliberately not a real vendor's:
 a descriptor is never relabelled as somebody else's product by changing a
 VID/PID. Request an allocated product ID from pid.codes before a wide release
 so two virtual devices cannot collide.
+
+## XInput
+
+`xinputhid.sys` is a filter driver, not a bus driver. `xinputhid.inf` attaches
+it to any HID device whose hardware ID appears in its match list
+(`HID\VID_045E&PID_xxxx&IG_00`), and `VHF_CONFIG` carries a `HardwareIDs`
+field, so a VHF child can carry a matching ID and pick up the filter. That is
+the whole mechanism: no bus driver, no kernel code in this project.
+
+The IDs are supplied at runtime through `VHF_CONFIG`, so the signed INF and
+catalog contain none of them. The Xbox Series profile offers the specific
+Series identity first and the generic GIP software product ID behind it, so the
+filter still attaches if the specific entry is ever retired.
+
+Xbox 360 stays out of reach for a different reason. A real 360 pad is an XUSB
+device on a USB bus; `xusb22.sys` binds to a bus child, which VHF cannot
+create. No descriptor makes that profile honest, so `find_profile` refuses it.
 
 ## Force feedback
 
