@@ -15,6 +15,7 @@
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
+#include "profile.h"
 #include "xbox_series.h"
 
 #include <cstdio>
@@ -855,6 +856,37 @@ int main() {
     check(event.controller_id == 7, "ps feedback controller id");
     check(event.payload_size == sizeof(feedback), "ps feedback payload size");
     check(valid_request(&event, sizeof(event)), "ps feedback is a valid protocol message");
+  }
+
+  {
+    // A profile the driver does not implement has to be refused, not answered
+    // with a neighbouring one. This is the guard against a switch fallthrough
+    // handing a caller a different vendor's controller under the wrong name.
+    struct expectation { profile id; bool implemented; const char *name; };
+    const expectation expectations[] = {
+      {profile::generic_hid, true, "generic_hid"},
+      {profile::generic_pid, true, "generic_pid"},
+      {profile::xbox_series, true, "xbox_series"},
+      {profile::dualshock_4, true, "dualshock_4"},
+      {profile::dualsense, true, "dualsense"},
+      {profile::xbox_360, false, "xbox_360"},
+      {profile::xbox_one, false, "xbox_one"},
+      {profile::switch_pro, false, "switch_pro"},
+    };
+
+    profile_mask_t expected_mask = 0;
+    for (const expectation &e : expectations) {
+      const profile_definition *const found = find_profile(e.id);
+      check((found != nullptr) == e.implemented,
+            std::string(e.name) + (e.implemented ? " is implemented" : " is refused"));
+      if (found != nullptr) {
+        check(found->id == e.id,
+              std::string(e.name) + " returns its own definition, not another profile's");
+        expected_mask |= profile_bit(e.id);
+      }
+    }
+    check(available_profiles() == expected_mask,
+          "the advertised mask matches what find_profile implements");
   }
 
   if (g_failures == 0) {
