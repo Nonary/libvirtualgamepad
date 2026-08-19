@@ -889,6 +889,31 @@ int main() {
           "the advertised mask matches what find_profile implements");
   }
 
+  {
+    // Every profile owns its device's axis convention, so the protocol always
+    // carries positive-up and a client must never pre-convert.
+    input_state_request input {};
+    input.header.size = sizeof(input);
+    input.header.version = k_protocol_version;
+
+    input.left_y = 32767;   // Fully up.
+    input.right_y = 32767;
+    const generic_input_report up = encode_generic_input(input);
+    check(up.left_y < 0, "generic profile sends stick-up as negative HID Y");
+    check(up.right_y < 0, "generic profile sends stick-up as negative HID Ry");
+
+    input.left_y = -32768;  // Fully down, and the value that cannot be negated.
+    const generic_input_report down = encode_generic_input(input);
+    check(down.left_y == 32767, "generic profile saturates INT16_MIN instead of wrapping");
+
+    input.left_y = 0;
+    check(encode_generic_input(input).left_y == 0, "generic profile leaves a centred stick alone");
+
+    // Horizontal axes are already the same in both conventions.
+    input.left_x = 12345;
+    check(encode_generic_input(input).left_x == 12345, "generic profile passes X through");
+  }
+
   if (g_failures == 0) {
     std::printf("all PID descriptor and engine checks passed\n");
     return 0;

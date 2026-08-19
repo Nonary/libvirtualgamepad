@@ -157,6 +157,11 @@ struct controller_id_request {
   std::uint32_t controller_id;
 };
 
+// Axes are Vibeshine's normalized state: sticks are signed with **positive
+// meaning up and right**, and triggers are 0..255. Each profile converts to its
+// own device's convention, because they disagree - HID sticks are positive-down
+// and a DualShock 4's are unsigned. A client must not pre-convert; doing so on
+// top of the profile's conversion inverts the vertical axes.
 struct input_state_request {
   request_header header;
   std::uint32_t controller_id;

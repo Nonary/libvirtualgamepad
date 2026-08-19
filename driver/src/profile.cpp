@@ -260,15 +260,24 @@ profile_mask_t available_profiles() noexcept {
   return mask;
 }
 
+// HID Generic Desktop Y and Ry are positive-down; the protocol's are positive-up.
+// Every other profile converts this itself, and the generic profiles used to be
+// the exception, which left the conversion to the client and double-inverted the
+// vertical axes once other profiles existed. INT16_MIN has no positive
+// counterpart, so it saturates rather than wrapping back to itself.
+[[nodiscard]] std::int16_t to_hid_vertical_axis(const std::int16_t value) noexcept {
+  return value == -32768 ? 32767 : static_cast<std::int16_t>(-value);
+}
+
 generic_input_report encode_generic_input(const input_state_request &input) noexcept {
   return {
     k_generic_input_report_id,
     map_buttons(input.buttons),
     encode_hat(input.buttons),
     input.left_x,
-    input.left_y,
+    to_hid_vertical_axis(input.left_y),
     input.right_x,
-    input.right_y,
+    to_hid_vertical_axis(input.right_y),
     input.left_trigger,
     input.right_trigger,
   };
