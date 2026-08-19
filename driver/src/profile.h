@@ -69,6 +69,11 @@ struct profile_definition {
 // VID/PID-only emulation from becoming a supported controller type.
 [[nodiscard]] const profile_definition *find_profile(profile id) noexcept;
 
+// Every profile find_profile can return, as a protocol profile mask. Derived
+// from find_profile itself: a profile the driver implements but does not
+// advertise can never be requested, and the two drifting apart is silent.
+[[nodiscard]] profile_mask_t available_profiles() noexcept;
+
 [[nodiscard]] generic_input_report encode_generic_input(
   const input_state_request &input) noexcept;
 

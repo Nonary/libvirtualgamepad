@@ -200,6 +200,27 @@ const profile_definition *find_profile(const profile id) noexcept {
   return nullptr;
 }
 
+profile_mask_t available_profiles() noexcept {
+  constexpr profile k_candidates[] = {
+    profile::generic_hid,
+    profile::generic_pid,
+    profile::xbox_360,
+    profile::xbox_one,
+    profile::xbox_series,
+    profile::dualshock_4,
+    profile::dualsense,
+    profile::switch_pro,
+  };
+
+  profile_mask_t mask = 0;
+  for (const profile candidate : k_candidates) {
+    if (find_profile(candidate) != nullptr) {
+      mask |= profile_bit(candidate);
+    }
+  }
+  return mask;
+}
+
 generic_input_report encode_generic_input(const input_state_request &input) noexcept {
   return {
     k_generic_input_report_id,

@@ -875,7 +875,7 @@ void evt_io_device_control(
         output->header.version = lvg::k_protocol_version;
         output->minimum_protocol_version = lvg::k_protocol_version;
         output->maximum_protocol_version = lvg::k_protocol_version;
-        output->available_profiles = lvg::profile_bit(lvg::profile::generic_hid);
+        output->available_profiles = lvg::driver::available_profiles();
         output->available_features = lvg::feature_input_state | lvg::feature_feedback;
         output->maximum_controllers = lvg::k_max_controllers;
         information = sizeof(*output);
@@ -1110,16 +1110,20 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
     context->controllers[index].state = slot_state::empty;
   }
 
+  // The effect clock is an enhancement, not a prerequisite. Failing the whole
+  // EvtDeviceAdd when it cannot be created takes the entire device down with
+  // STATUS_NOT_SUPPORTED and leaves the control interface registered but
+  // disabled, which reads as "driver installed but unusable". Without the timer
+  // force feedback still tracks every report the host sends; only unattended
+  // duration expiry and envelope shaping are lost.
   WDF_TIMER_CONFIG timer_config;
   WDF_TIMER_CONFIG_INIT_PERIODIC(&timer_config, evt_pid_tick, k_pid_tick_ms);
   timer_config.AutomaticSerialization = FALSE;
   WDF_OBJECT_ATTRIBUTES timer_attributes;
   WDF_OBJECT_ATTRIBUTES_INIT(&timer_attributes);
   timer_attributes.ParentObject = device;
-  timer_attributes.ExecutionLevel = WdfExecutionLevelPassive;
-  status = WdfTimerCreate(&timer_config, &timer_attributes, &context->pid_timer);
-  if (!NT_SUCCESS(status)) {
-    return status;
+  if (!NT_SUCCESS(WdfTimerCreate(&timer_config, &timer_attributes, &context->pid_timer))) {
+    context->pid_timer = nullptr;
   }
 
   WDF_OBJECT_ATTRIBUTES lifetime_attributes;
