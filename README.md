@@ -41,9 +41,9 @@ The target profile set is deliberately explicit:
 | Xbox 360 | Not reachable from VHF. A real Xbox 360 pad is an XUSB device on a USB bus, which needs a bus child that VHF cannot create. |
 | Xbox One | Reachable in principle by the same route as Xbox Series; not implemented until its report shape and feature behavior are tested. |
 | Xbox Series | Implemented. Native report shape plus the hardware ID that makes Windows attach its inbox XInput filter. |
-| DualShock 4 | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
-| DualSense | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
-| Switch Pro | Requires an independently captured and tested HID descriptor plus output/feature behavior. |
+| DualShock 4 | Implemented. Native report shape, touchpad, motion, battery, lightbar, and the calibration/pairing/firmware features. |
+| DualSense | Implemented. As DualShock 4, plus adaptive triggers, player LEDs, and the microphone LED. |
+| Switch Pro | Implemented. Native report set plus the USB handshake, subcommand replies, and emulated calibration flash a host reads before it will use the device. |
 
 A profile becomes available only after its descriptor, input mapping, output
 mapping, application behavior, and provenance have all been tested. The bar is

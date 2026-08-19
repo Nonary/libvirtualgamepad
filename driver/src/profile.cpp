@@ -6,6 +6,7 @@
 #include "pid_ff.h"
 #include "dualsense.h"
 #include "dualshock4.h"
+#include "switch_pro.h"
 #include "xbox_series.h"
 
 #include <cstring>
@@ -148,6 +149,19 @@ constexpr profile_definition k_generic_profile {
   return definition;
 }
 
+[[nodiscard]] const profile_definition &switch_pro_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::switch_pro;
+    value.report_descriptor = switch_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_switch_vendor_id;
+    value.product_id = k_switch_product_id;
+    value.version_number = k_switch_version;
+    return value;
+  }();
+  return definition;
+}
+
 [[nodiscard]] const profile_definition &generic_pid_profile() noexcept {
   static const profile_definition definition = [] {
     profile_definition value {};
@@ -234,7 +248,7 @@ const profile_definition *find_profile(const profile id) noexcept {
     case profile::dualsense:
       return &dualsense_profile();
     case profile::switch_pro:
-      return nullptr;
+      return &switch_pro_profile();
   }
   return nullptr;
 }

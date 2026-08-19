@@ -16,6 +16,7 @@
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
+#include "switch_pro.h"
 #include "xbox_series.h"
 
 #include <cstdio>
@@ -871,7 +872,7 @@ int main() {
       {profile::dualsense, true, "dualsense"},
       {profile::xbox_360, false, "xbox_360"},
       {profile::xbox_one, false, "xbox_one"},
-      {profile::switch_pro, false, "switch_pro"},
+      {profile::switch_pro, true, "switch_pro"},
     };
 
     profile_mask_t expected_mask = 0;
@@ -912,6 +913,230 @@ int main() {
     // Horizontal axes are already the same in both conventions.
     input.left_x = 12345;
     check(encode_generic_input(input).left_x == 12345, "generic profile passes X through");
+  }
+
+  {
+    // ---- Switch Pro ----
+    std::size_t sw_size = 0;
+    const std::uint8_t *const sw = switch_descriptor(&sw_size);
+    const walk_result_t sw_parsed = walk(sw, sw_size);
+    check(sw_parsed.well_formed, "switch descriptor parses: " + sw_parsed.error);
+    if (sw_parsed.well_formed) {
+      check(sw_parsed.collection_depth == 0, "switch collections balance");
+      std::printf("switch descriptor: %zu bytes, %zu items, %zu report ids\n",
+                  sw_size, sw_parsed.item_count, sw_parsed.reports.size());
+      for (const std::uint8_t id : {k_switch_input_report_id, k_switch_subcommand_reply_id,
+                                    k_switch_usb_reply_id}) {
+        const auto found = sw_parsed.reports.find(id);
+        if (found == sw_parsed.reports.end()) {
+          check(false, "switch input report " + std::to_string(id) + " declared");
+        } else {
+          check(found->second.input / 8 + 1 == 64,
+                "switch report " + std::to_string(id) + " is 64 bytes");
+        }
+      }
+      for (const std::uint8_t id : {k_switch_rumble_subcommand_id, k_switch_rumble_only_id,
+                                    k_switch_usb_command_id}) {
+        const auto found = sw_parsed.reports.find(id);
+        if (found == sw_parsed.reports.end()) {
+          check(false, "switch output report " + std::to_string(id) + " declared");
+        } else {
+          check(found->second.output / 8 + 1 == 64,
+                "switch output " + std::to_string(id) + " is 64 bytes");
+        }
+      }
+    }
+  }
+
+  {
+    switch_state state {};
+    state.reset();
+
+    input_state_request input {};
+    input.header.size = sizeof(input);
+    input.header.version = k_protocol_version;
+
+    switch_input_report report = encode_switch_input(input, &state);
+    check(report.report_id == k_switch_input_report_id, "switch report id");
+
+    const auto axis = [](const std::uint8_t *st) {
+      return static_cast<std::uint16_t>(st[0] | ((st[1] & 0x0F) << 8));
+    };
+    const auto vertical = [](const std::uint8_t *st) {
+      return static_cast<std::uint16_t>((st[1] >> 4) | (st[2] << 4));
+    };
+
+    check(axis(report.left_stick) == k_switch_stick_center, "switch centred X");
+    check(vertical(report.left_stick) == k_switch_stick_center, "switch centred Y");
+
+    // This controller already reports positive-up, so unlike every other
+    // profile the vertical axes must NOT be inverted.
+    input.left_y = 32767;
+    report = encode_switch_input(input, &state);
+    check(vertical(report.left_stick) > k_switch_stick_center,
+          "switch stick up increases the vertical axis");
+    input.left_y = -32768;
+    report = encode_switch_input(input, &state);
+    check(vertical(report.left_stick) < k_switch_stick_center,
+          "switch stick down decreases the vertical axis");
+    input.left_y = 0;
+
+    // Face buttons are positional: south is where Nintendo prints B.
+    input.buttons = button_mask::south;
+    check((encode_switch_input(input, &state).buttons_right & switch_b) != 0, "south is B");
+    input.buttons = button_mask::east;
+    check((encode_switch_input(input, &state).buttons_right & switch_a) != 0, "east is A");
+    input.buttons = button_mask::west;
+    check((encode_switch_input(input, &state).buttons_right & switch_y) != 0, "west is Y");
+    input.buttons = button_mask::north;
+    check((encode_switch_input(input, &state).buttons_right & switch_x) != 0, "north is X");
+    input.buttons = button_mask::dpad_up;
+    check((encode_switch_input(input, &state).buttons_left & switch_up) != 0, "d-pad up");
+    input.buttons = button_mask::home;
+    check((encode_switch_input(input, &state).buttons_shared & switch_home) != 0, "home");
+    input.buttons = button_mask::misc;
+    check((encode_switch_input(input, &state).buttons_shared & switch_capture) != 0,
+          "misc is Capture");
+    input.buttons = 0;
+
+    // No analog triggers on this pad; travel becomes the digital shoulder.
+    input.left_trigger = 200;
+    check((encode_switch_input(input, &state).buttons_left & switch_zl) != 0, "left trigger is ZL");
+    input.left_trigger = 0;
+    check((encode_switch_input(input, &state).buttons_left & switch_zl) == 0, "ZL releases");
+  }
+
+  {
+    // USB handshake: a host will not proceed without these replies.
+    switch_state state {};
+    state.reset();
+    switch_usb_reply reply {};
+
+    const std::uint8_t status_cmd[2] = {k_switch_usb_command_id, k_switch_usb_request_status};
+    check(handle_switch_usb_command(status_cmd, sizeof(status_cmd), &state, &reply) != 0,
+          "status command answered");
+    check(reply.report_id == k_switch_usb_reply_id, "usb reply id");
+    check(reply.subtype == k_switch_usb_request_status, "usb reply subtype");
+    check(reply.data[1] == 0x03, "reports itself as a Pro Controller");
+    check((reply.data[2] & 0x02) != 0, "advertised address is locally administered");
+
+    const std::uint8_t handshake[2] = {k_switch_usb_command_id, k_switch_usb_handshake};
+    check(handle_switch_usb_command(handshake, sizeof(handshake), &state, &reply) != 0,
+          "handshake answered");
+    check(state.handshake_complete, "handshake recorded");
+
+    const std::uint8_t timeout[2] = {k_switch_usb_command_id, k_switch_usb_disable_timeout};
+    check(handle_switch_usb_command(timeout, sizeof(timeout), &state, &reply) == 0,
+          "disable-timeout is answered by silence");
+
+    const std::uint8_t foreign[2] = {0x42, 0x01};
+    check(handle_switch_usb_command(foreign, sizeof(foreign), &state, &reply) == 0,
+          "a foreign report id is ignored");
+  }
+
+  {
+    // Subcommands, including the SPI reads a host uses for calibration.
+    switch_state state {};
+    state.reset();
+    input_state_request last {};
+    last.header.size = sizeof(last);
+    last.header.version = k_protocol_version;
+    switch_subcommand_reply reply {};
+
+    std::uint8_t request[64] {};
+    request[0] = k_switch_rumble_subcommand_id;
+    request[10] = k_switch_sub_request_device_info;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "device info answered");
+    check(reply.report_id == k_switch_subcommand_reply_id, "subcommand reply id");
+    check(reply.ack == 0x82, "device info ack");
+    check(reply.subcommand == k_switch_sub_request_device_info, "echoes the subcommand");
+    check(reply.data[2] == 0x03, "device info reports a Pro Controller");
+
+    // Factory stick calibration must come back as real data, not erased flash,
+    // or the host calibrates against 0xFF and the sticks read hard over.
+    request[10] = k_switch_sub_spi_read;
+    request[11] = 0x3D;
+    request[12] = 0x60;
+    request[13] = 0x00;
+    request[14] = 0x00;
+    request[15] = 18;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "spi read answered");
+    check(reply.ack == 0x90, "spi read ack");
+    check(reply.data[0] == 0x3D && reply.data[1] == 0x60, "spi reply echoes the address");
+    check(reply.data[4] == 18, "spi reply echoes the length");
+    bool all_erased = true;
+    for (int i = 0; i < 18; ++i) {
+      if (reply.data[5 + i] != 0xFF) {
+        all_erased = false;
+        break;
+      }
+    }
+    check(!all_erased, "factory stick calibration is populated");
+
+    // User calibration is deliberately erased so the host falls back.
+    request[11] = 0x10;
+    request[12] = 0x80;
+    request[15] = 24;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "user calibration read answered");
+    bool user_erased = true;
+    for (int i = 0; i < 24; ++i) {
+      if (reply.data[5 + i] != 0xFF) {
+        user_erased = false;
+        break;
+      }
+    }
+    check(user_erased, "user calibration reads as unset");
+
+    request[10] = k_switch_sub_enable_imu;
+    request[11] = 1;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "imu enable answered");
+    check(state.imu_enabled, "imu enable recorded");
+
+    request[10] = k_switch_sub_set_player_lights;
+    request[11] = 0x03;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "player lights answered");
+    check(state.player_lights == 0x03, "player lights recorded");
+
+    // An unmodelled subcommand is acknowledged rather than stalling the host.
+    request[10] = 0x77;
+    check(handle_switch_subcommand(request, sizeof(request), last, &state, &reply) != 0,
+          "unknown subcommand acknowledged");
+    check(reply.ack == 0x80, "unknown subcommand ack");
+  }
+
+  {
+    // Rumble: neutral must read as silence, not as a small constant buzz.
+    std::uint8_t neutral[10] {};
+    neutral[0] = k_switch_rumble_only_id;
+    const std::uint8_t idle[4] = {0x00, 0x01, 0x40, 0x40};
+    std::memcpy(neutral + 2, idle, 4);
+    std::memcpy(neutral + 6, idle, 4);
+
+    playstation_output_feedback feedback {};
+    check(decode_switch_rumble(neutral, sizeof(neutral), &feedback), "neutral rumble decodes");
+    check(feedback.low_frequency == 0 && feedback.high_frequency == 0,
+          "the neutral rumble pattern is silent");
+
+    std::uint8_t strong[10] {};
+    strong[0] = k_switch_rumble_only_id;
+    strong[2] = 0x00;
+    strong[3] = static_cast<std::uint8_t>(k_switch_amplitude_max << 1);
+    strong[4] = 0x40;
+    strong[5] = 0x40;
+    std::memcpy(strong + 6, idle, 4);
+    check(decode_switch_rumble(strong, sizeof(strong), &feedback), "strong rumble decodes");
+    check(feedback.low_frequency == 65535, "full amplitude is full scale");
+    check(feedback.high_frequency == 0, "the idle side stays silent");
+
+    std::uint8_t foreign_rumble[10] {};
+    foreign_rumble[0] = 0x42;
+    check(!decode_switch_rumble(foreign_rumble, sizeof(foreign_rumble), &feedback),
+          "a foreign report id is rejected");
   }
 
   if (g_failures == 0) {

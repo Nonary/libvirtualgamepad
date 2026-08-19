@@ -99,6 +99,7 @@
     <ClCompile Include="src\dualshock4.cpp" />
     <ClCompile Include="src\pid_ff.cpp" />
     <ClCompile Include="src\profile.cpp" />
+    <ClCompile Include="src\switch_pro.cpp" />
     <ClCompile Include="src\xbox_series.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -107,6 +108,7 @@
     <ClInclude Include="src\dualshock4.h" />
     <ClInclude Include="src\pid_ff.h" />
     <ClInclude Include="src\profile.h" />
+    <ClInclude Include="src\switch_pro.h" />
     <ClInclude Include="src\xbox_series.h" />
     <None Include="VibeshineVhfGamepad.inf.in" />
   </ItemGroup>

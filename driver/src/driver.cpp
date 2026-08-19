@@ -14,12 +14,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <tuple>
 
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
+#include "switch_pro.h"
 #include "xbox_series.h"
 
 namespace {
@@ -71,6 +73,7 @@ struct controller_slot {
   lvg::input_state_request last_input;
   lvg::driver::ds4_state ds4;
   lvg::driver::ds5_state ds5;
+  lvg::driver::switch_state switch_pro;
   // Zeroed by reset_slot and initialized by create_controller: WDF allocates
   // the device context as raw memory, so no constructor runs for this member.
   pid_engine pid;
@@ -290,6 +293,7 @@ void destroy_owned_controller(
   slot.last_input = {};
   slot.ds4.reset();
   slot.ds5.reset();
+  slot.switch_pro.reset();
   unlock_context(context);
 
   // The start path already opens this target. Retrying here keeps a source
@@ -448,6 +452,39 @@ void destroy_owned_controller(
   return VhfReadReportSubmit(vhf, &transfer);
 }
 
+// Resends the current state for whichever profile owns the slot. Touch, motion
+// and battery all arrive as separate IOCTLs but travel inside the device's one
+// input report, so each has to rebuild and resend it.
+[[nodiscard]] NTSTATUS submit_profile_report(
+  device_context *const context,
+  controller_slot &slot) noexcept {
+  if (slot.selected_profile != lvg::profile::switch_pro) {
+    return submit_playstation_report(context, slot);
+  }
+
+  lock_context(context);
+  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+    unlock_context(context);
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (!slot.have_last_input) {
+    unlock_context(context);
+    return STATUS_SUCCESS;
+  }
+
+  const lvg::driver::switch_input_report report =
+    lvg::driver::encode_switch_input(slot.last_input, &slot.switch_pro);
+  HID_XFER_PACKET transfer {
+    reinterpret_cast<PUCHAR>(const_cast<lvg::driver::switch_input_report *>(&report)),
+    sizeof(report),
+    lvg::driver::k_switch_input_report_id,
+  };
+  const VHFHANDLE vhf = slot.vhf;
+  unlock_context(context);
+
+  return VhfReadReportSubmit(vhf, &transfer);
+}
+
 // Shared preamble for the touch, motion, and battery IOCTLs: validate the
 // controller and ownership, then hand back the slot for the profile to fold the
 // event into. Returns STATUS_SUCCESS when *slot_out is usable.
@@ -470,8 +507,8 @@ void destroy_owned_controller(
   if (!usable) {
     return STATUS_DEVICE_NOT_READY;
   }
-  if (!is_playstation(profile)) {
-    // Only the PlayStation profiles have a touchpad, motion sensors, and a
+  if (!is_playstation(profile) && profile != lvg::profile::switch_pro) {
+    // Only the PlayStation and Switch Pro profiles have motion sensors and a
     // battery to report against.
     return STATUS_NOT_SUPPORTED;
   }
@@ -493,9 +530,12 @@ void destroy_owned_controller(
   }
 
   lock_context(context);
+  // Only the PlayStation pads have a touchpad.
   const bool applied = slot->selected_profile == lvg::profile::dualshock_4
                          ? lvg::driver::apply_ds4_touch(request, &slot->ds4)
-                         : lvg::driver::apply_ds5_touch(request, &slot->ds5);
+                         : slot->selected_profile == lvg::profile::dualsense
+                             ? lvg::driver::apply_ds5_touch(request, &slot->ds5)
+                             : false;
   unlock_context(context);
 
   if (!applied) {
@@ -503,7 +543,7 @@ void destroy_owned_controller(
     return STATUS_INVALID_PARAMETER;
   }
 
-  status = submit_playstation_report(context, *slot);
+  status = submit_profile_report(context, *slot);
   unlock_lifetime(context);
   return status;
 }
@@ -521,9 +561,12 @@ void destroy_owned_controller(
   }
 
   lock_context(context);
-  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
-                         ? lvg::driver::apply_ds4_motion(request, &slot->ds4)
-                         : lvg::driver::apply_ds5_motion(request, &slot->ds5);
+  const bool applied =
+    slot->selected_profile == lvg::profile::dualshock_4
+      ? lvg::driver::apply_ds4_motion(request, &slot->ds4)
+      : slot->selected_profile == lvg::profile::dualsense
+          ? lvg::driver::apply_ds5_motion(request, &slot->ds5)
+          : lvg::driver::apply_switch_motion(request, &slot->switch_pro);
   unlock_context(context);
 
   if (!applied) {
@@ -531,7 +574,7 @@ void destroy_owned_controller(
     return STATUS_INVALID_PARAMETER;
   }
 
-  status = submit_playstation_report(context, *slot);
+  status = submit_profile_report(context, *slot);
   unlock_lifetime(context);
   return status;
 }
@@ -549,9 +592,12 @@ void destroy_owned_controller(
   }
 
   lock_context(context);
-  const bool applied = slot->selected_profile == lvg::profile::dualshock_4
-                         ? lvg::driver::apply_ds4_battery(request, &slot->ds4)
-                         : lvg::driver::apply_ds5_battery(request, &slot->ds5);
+  const bool applied =
+    slot->selected_profile == lvg::profile::dualshock_4
+      ? lvg::driver::apply_ds4_battery(request, &slot->ds4)
+      : slot->selected_profile == lvg::profile::dualsense
+          ? lvg::driver::apply_ds5_battery(request, &slot->ds5)
+          : lvg::driver::apply_switch_battery(request, &slot->switch_pro);
   unlock_context(context);
 
   if (!applied) {
@@ -559,7 +605,7 @@ void destroy_owned_controller(
     return STATUS_INVALID_PARAMETER;
   }
 
-  status = submit_playstation_report(context, *slot);
+  status = submit_profile_report(context, *slot);
   unlock_lifetime(context);
   return status;
 }
@@ -591,6 +637,24 @@ void destroy_owned_controller(
     const NTSTATUS ps_status = submit_playstation_report(context, slot);
     unlock_lifetime(context);
     return ps_status;
+  }
+
+  if (slot.selected_profile == lvg::profile::switch_pro) {
+    slot.last_input = request;
+    slot.have_last_input = true;
+    const lvg::driver::switch_input_report switch_report =
+      lvg::driver::encode_switch_input(request, &slot.switch_pro);
+    HID_XFER_PACKET switch_transfer {
+      reinterpret_cast<PUCHAR>(const_cast<lvg::driver::switch_input_report *>(&switch_report)),
+      sizeof(switch_report),
+      lvg::driver::k_switch_input_report_id,
+    };
+
+    const VHFHANDLE switch_vhf = slot.vhf;
+    unlock_context(context);
+    const NTSTATUS switch_status = VhfReadReportSubmit(switch_vhf, &switch_transfer);
+    unlock_lifetime(context);
+    return switch_status;
   }
 
   if (slot.selected_profile == lvg::profile::xbox_series) {
@@ -801,6 +865,66 @@ void evt_vhf_write_report(
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
   bool arm_tick = false;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->selected_profile == lvg::profile::switch_pro) {
+    using namespace lvg::driver;
+
+    auto *const context = slot->parent;
+    switch_usb_reply usb_reply {};
+    switch_subcommand_reply sub_reply {};
+    PUCHAR reply_buffer = nullptr;
+    ULONG reply_size = 0;
+    UCHAR reply_id = 0;
+
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      // Rumble rides along with the subcommand reports as well as arriving on
+      // its own, so decode it before deciding what to answer.
+      lvg::playstation_output_feedback rumble {};
+      if (transfer->reportBuffer != nullptr &&
+          decode_switch_rumble(transfer->reportBuffer, transfer->reportBufferLen, &rumble)) {
+        slot->feedback = encode_playstation_feedback(slot->controller_id, rumble);
+        slot->feedback_pending = true;
+      }
+
+      if (transfer->reportId == k_switch_usb_command_id) {
+        if (handle_switch_usb_command(transfer->reportBuffer, transfer->reportBufferLen,
+                                      &slot->switch_pro, &usb_reply) != 0) {
+          reply_buffer = reinterpret_cast<PUCHAR>(&usb_reply);
+          reply_size = sizeof(usb_reply);
+          reply_id = k_switch_usb_reply_id;
+        }
+      } else if (transfer->reportId == k_switch_rumble_subcommand_id) {
+        if (handle_switch_subcommand(transfer->reportBuffer, transfer->reportBufferLen,
+                                     slot->last_input, &slot->switch_pro, &sub_reply) != 0) {
+          reply_buffer = reinterpret_cast<PUCHAR>(&sub_reply);
+          reply_size = sizeof(sub_reply);
+          reply_id = k_switch_subcommand_reply_id;
+        }
+      }
+      status = STATUS_SUCCESS;
+    }
+    const VHFHANDLE vhf = slot->vhf;
+    unlock_context(context);
+
+    // This controller answers commands on the input pipe, so a reply is a read
+    // report rather than an operation result. Submitting it from inside the
+    // callback is safe without the lifetime gate: VhfDelete waits for this
+    // callback to return, so the handle cannot go away underneath it, and
+    // taking the gate here would deadlock against that wait.
+    if (NT_SUCCESS(status) && reply_size != 0 && vhf != nullptr) {
+      HID_XFER_PACKET reply_transfer {reply_buffer, reply_size, reply_id};
+      std::ignore = VhfReadReportSubmit(vhf, &reply_transfer);
+    }
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       is_playstation(slot->selected_profile)) {
