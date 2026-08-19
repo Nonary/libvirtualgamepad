@@ -37,6 +37,10 @@ enum class profile : std::uint16_t {
   dualshock_4 = 5,
   dualsense = 6,
   switch_pro = 7,
+  // A generic HID game pad that also publishes the DirectInput Physical
+  // Interface Device report set, so DirectInput applications see a
+  // force-feedback capable device instead of a rumble-less pad.
+  generic_pid = 8,
 };
 
 enum button_mask : std::uint32_t {
@@ -70,6 +74,11 @@ enum class feedback_type : std::uint16_t {
   none = 0,
   generic_rumble_rgb = 1,
   raw_output_report = 2,
+  // Rumble without a light. The payload is still generic_rumble_rgb_feedback,
+  // but its colour channels carry no meaning: a DirectInput PID effect says
+  // nothing about an LED, and reporting one would make a client turn a real
+  // controller's light off every time a game started a force.
+  generic_rumble = 3,
 };
 
 using profile_mask_t = std::uint32_t;

@@ -95,10 +95,12 @@
 
   <ItemGroup>
     <ClCompile Include="src\driver.cpp" />
+    <ClCompile Include="src\pid_ff.cpp" />
     <ClCompile Include="src\profile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\libvirtualgamepad\protocol.h" />
+    <ClInclude Include="src\pid_ff.h" />
     <ClInclude Include="src\profile.h" />
     <None Include="VibeshineVhfGamepad.inf.in" />
   </ItemGroup>

@@ -16,6 +16,7 @@
 #include <cstring>
 
 #include "libvirtualgamepad/protocol.h"
+#include "pid_ff.h"
 #include "profile.h"
 
 namespace {
@@ -27,7 +28,14 @@ using lvg::driver::generic_input_report;
 using lvg::driver::generic_output_report;
 using lvg::driver::k_generic_input_report_id;
 using lvg::driver::k_generic_output_report_id;
+using lvg::driver::pid_engine;
+using lvg::driver::pid_rumble_t;
 using lvg::driver::profile_definition;
+
+// How often playing force-feedback effects are advanced. Envelopes and finite
+// durations only need to look continuous to a human hand, and the timer stops
+// itself as soon as nothing is playing.
+constexpr LONG k_pid_tick_ms = 10;
 
 enum class slot_state : std::uint8_t {
   empty,
@@ -47,6 +55,14 @@ struct controller_slot {
   slot_state state;
   bool feedback_pending;
   lvg::feedback_event feedback;
+  // Set from the profile, so an output report is only interpreted as PID when
+  // the descriptor actually declared the PID collection.
+  bool force_feedback;
+  bool pid_rumble_valid;
+  pid_rumble_t pid_rumble;
+  // Zeroed by reset_slot and initialized by create_controller: WDF allocates
+  // the device context as raw memory, so no constructor runs for this member.
+  pid_engine pid;
 };
 
 struct device_context {
@@ -56,6 +72,7 @@ struct device_context {
   HANDLE vhf_file_handle;
   bool vhf_target_open;
   bool stopping;
+  WDFTIMER pid_timer;
   controller_slot controllers[lvg::k_max_controllers];
 };
 
@@ -74,7 +91,10 @@ EVT_WDF_DEVICE_FILE_CREATE evt_file_create;
 EVT_WDF_FILE_CLOSE evt_file_close;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL evt_io_device_control;
 EVT_VHF_ASYNC_OPERATION evt_vhf_write_report;
+EVT_VHF_ASYNC_OPERATION evt_vhf_get_feature;
+EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
+EVT_WDF_TIMER evt_pid_tick;
 
 void lock_context(device_context *const context) noexcept {
   WdfWaitLockAcquire(context->state_lock, nullptr);
@@ -245,6 +265,12 @@ void destroy_owned_controller(
   slot.selected_profile = request.requested_profile;
   slot.state = slot_state::starting;
   slot.feedback_pending = false;
+  slot.force_feedback = definition->force_feedback;
+  slot.pid_rumble_valid = false;
+  slot.pid_rumble = {};
+  // reset_slot zeroed this storage, so the engine has to be put into its
+  // documented initial state explicitly before any report can reach it.
+  slot.pid.reset();
   unlock_context(context);
 
   // The start path already opens this target. Retrying here keeps a source
@@ -276,6 +302,17 @@ void destroy_owned_controller(
   config.VhfClientContext = &slot;
   config.EvtVhfAsyncOperationWriteReport = evt_vhf_write_report;
   config.EvtVhfCleanup = evt_vhf_cleanup;
+  // Without an identity the HID child enumerates as VID/PID 0000:0000, which
+  // leaves Windows and applications nothing to match on.
+  config.VendorID = definition->vendor_id;
+  config.ProductID = definition->product_id;
+  config.VersionNumber = definition->version_number;
+  if (definition->force_feedback) {
+    // DirectInput discovers effect capacity and allocates effect blocks through
+    // feature reports, so a PID profile is not usable without these.
+    config.EvtVhfAsyncOperationGetFeature = evt_vhf_get_feature;
+    config.EvtVhfAsyncOperationSetFeature = evt_vhf_set_feature;
+  }
 
   VHFHANDLE vhf = nullptr;
   NTSTATUS status = VhfCreate(&config, &vhf);
@@ -407,6 +444,115 @@ void destroy_owned_controller(
   return status;
 }
 
+// Copies a PID output report out of the transfer packet. HID pads the buffer
+// to the report's declared length, so a longer buffer is normal; a shorter one
+// means the report is not the one the descriptor declared.
+template<class report_t>
+[[nodiscard]] bool read_pid_report(const PHID_XFER_PACKET transfer, report_t *const out) noexcept {
+  if (transfer->reportBuffer == nullptr || transfer->reportBufferLen < sizeof(report_t)) {
+    return false;
+  }
+  std::memcpy(out, transfer->reportBuffer, sizeof(report_t));
+  return out->report_id == transfer->reportId;
+}
+
+// Applies one PID output report. The caller owns state_lock.
+[[nodiscard]] NTSTATUS apply_pid_output(
+  controller_slot *const slot,
+  const PHID_XFER_PACKET transfer) noexcept {
+  using namespace lvg::driver;
+
+  bool handled = false;
+  switch (transfer->reportId) {
+    case k_pid_set_effect_report_id: {
+      pid_set_effect_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_effect(report);
+      break;
+    }
+    case k_pid_set_envelope_report_id: {
+      pid_set_envelope_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_envelope(report);
+      break;
+    }
+    case k_pid_set_condition_report_id: {
+      pid_set_condition_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_condition(report);
+      break;
+    }
+    case k_pid_set_periodic_report_id: {
+      pid_set_periodic_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_periodic(report);
+      break;
+    }
+    case k_pid_set_constant_force_report_id: {
+      pid_set_constant_force_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_constant_force(report);
+      break;
+    }
+    case k_pid_set_ramp_force_report_id: {
+      pid_set_ramp_force_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.set_ramp_force(report);
+      break;
+    }
+    case k_pid_effect_operation_report_id: {
+      pid_effect_operation_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.effect_operation(report);
+      break;
+    }
+    case k_pid_block_free_report_id: {
+      pid_block_free_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.block_free(report);
+      break;
+    }
+    case k_pid_device_control_report_id: {
+      pid_device_control_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.device_control(report);
+      break;
+    }
+    case k_pid_device_gain_report_id: {
+      pid_device_gain_report report {};
+      handled = read_pid_report(transfer, &report) && slot->pid.device_gain(report);
+      break;
+    }
+    default:
+      return STATUS_INVALID_DEVICE_REQUEST;
+  }
+
+  return handled ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+
+// Publishes the engine's current rumble as a feedback event when it changed.
+// The caller owns state_lock.
+void publish_pid_rumble(controller_slot *const slot) noexcept {
+  const pid_rumble_t rumble = slot->pid.rumble();
+  if (slot->pid_rumble_valid &&
+      rumble.low_frequency == slot->pid_rumble.low_frequency &&
+      rumble.high_frequency == slot->pid_rumble.high_frequency) {
+    return;
+  }
+
+  slot->pid_rumble = rumble;
+  slot->pid_rumble_valid = true;
+
+  // Built here rather than through encode_generic_feedback so the event is
+  // tagged rumble-only: a PID effect carries no colour, and forwarding a black
+  // LED would switch off the light on the client's real controller.
+  lvg::feedback_event event {};
+  event.header.size = sizeof(event);
+  event.header.version = lvg::k_protocol_version;
+  event.controller_id = slot->controller_id;
+  event.type = lvg::feedback_type::generic_rumble;
+  const lvg::generic_rumble_rgb_feedback payload {
+    rumble.low_frequency,
+    rumble.high_frequency,
+    0, 0, 0, 0};
+  event.payload_size = sizeof(payload);
+  std::memcpy(event.payload, &payload, sizeof(payload));
+
+  slot->feedback = event;
+  slot->feedback_pending = true;
+}
+
 void evt_vhf_write_report(
   PVOID vhf_client_context,
   VHFOPERATIONHANDLE operation_handle,
@@ -414,6 +560,33 @@ void evt_vhf_write_report(
   PHID_XFER_PACKET transfer) {
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+  bool arm_tick = false;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->force_feedback && transfer->reportId != k_generic_output_report_id) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (!context->stopping && slot->state == slot_state::active) {
+      status = apply_pid_output(slot, transfer);
+      if (NT_SUCCESS(status)) {
+        publish_pid_rumble(slot);
+        arm_tick = slot->pid.needs_tick();
+      }
+    } else {
+      status = STATUS_DEVICE_NOT_READY;
+    }
+    unlock_context(context);
+
+    // Started outside the lock: the tick callback takes state_lock itself.
+    if (arm_tick && context->pid_timer != nullptr) {
+      WdfTimerStart(context->pid_timer, WDF_REL_TIMEOUT_IN_MS(k_pid_tick_ms));
+    }
+
+    if (operation_handle != nullptr) {
+      VhfAsyncOperationComplete(operation_handle, status);
+    }
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       transfer->reportId == k_generic_output_report_id &&
@@ -428,7 +601,8 @@ void evt_vhf_write_report(
       auto *const context = slot->parent;
       lock_context(context);
       if (!context->stopping && slot->state == slot_state::active &&
-          slot->selected_profile == lvg::profile::generic_hid) {
+          (slot->selected_profile == lvg::profile::generic_hid ||
+           slot->selected_profile == lvg::profile::generic_pid)) {
         slot->feedback = encode_generic_feedback(slot->controller_id, output);
         slot->feedback_pending = true;  // Coalesce to the current controller state.
         status = STATUS_SUCCESS;
@@ -441,6 +615,133 @@ void evt_vhf_write_report(
 
   if (operation_handle != nullptr) {
     VhfAsyncOperationComplete(operation_handle, status);
+  }
+}
+
+// DirectInput allocates an effect block by writing Create New Effect and then
+// reading PID Block Load; it sizes its effect list from PID Pool.
+void evt_vhf_get_feature(
+  PVOID vhf_client_context,
+  VHFOPERATIONHANDLE operation_handle,
+  PVOID,
+  PHID_XFER_PACKET transfer) {
+  using namespace lvg::driver;
+
+  auto *const slot = static_cast<controller_slot *>(vhf_client_context);
+  NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->force_feedback && transfer->reportBuffer != nullptr) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      switch (transfer->reportId) {
+        case k_pid_block_load_report_id: {
+          const pid_block_load_report report = slot->pid.block_load();
+          if (transfer->reportBufferLen >= sizeof(report)) {
+            std::memcpy(transfer->reportBuffer, &report, sizeof(report));
+            status = STATUS_SUCCESS;
+          } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+          }
+          break;
+        }
+        case k_pid_pool_report_id: {
+          const pid_pool_report report = slot->pid.pool();
+          if (transfer->reportBufferLen >= sizeof(report)) {
+            std::memcpy(transfer->reportBuffer, &report, sizeof(report));
+            status = STATUS_SUCCESS;
+          } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+          }
+          break;
+        }
+        case k_pid_state_report_id: {
+          const pid_state_report report = slot->pid.state();
+          if (transfer->reportBufferLen >= sizeof(report)) {
+            std::memcpy(transfer->reportBuffer, &report, sizeof(report));
+            status = STATUS_SUCCESS;
+          } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+          }
+          break;
+        }
+        default:
+          status = STATUS_INVALID_DEVICE_REQUEST;
+          break;
+      }
+    }
+    unlock_context(context);
+  }
+
+  if (operation_handle != nullptr) {
+    VhfAsyncOperationComplete(operation_handle, status);
+  }
+}
+
+void evt_vhf_set_feature(
+  PVOID vhf_client_context,
+  VHFOPERATIONHANDLE operation_handle,
+  PVOID,
+  PHID_XFER_PACKET transfer) {
+  using namespace lvg::driver;
+
+  auto *const slot = static_cast<controller_slot *>(vhf_client_context);
+  NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->force_feedback && transfer->reportId == k_pid_create_new_effect_report_id) {
+    pid_create_new_effect_report report {};
+    if (!read_pid_report(transfer, &report)) {
+      status = STATUS_INVALID_PARAMETER;
+    } else {
+      auto *const context = slot->parent;
+      lock_context(context);
+      if (context->stopping || slot->state != slot_state::active) {
+        status = STATUS_DEVICE_NOT_READY;
+      } else {
+        // A full pool is a normal answer, not a transport failure: the host
+        // learns about it by reading Block Load next.
+        static_cast<void>(slot->pid.create_new_effect(report));
+        status = STATUS_SUCCESS;
+      }
+      unlock_context(context);
+    }
+  }
+
+  if (operation_handle != nullptr) {
+    VhfAsyncOperationComplete(operation_handle, status);
+  }
+}
+
+// Advances every playing effect and stops itself once nothing is playing, so an
+// idle device does not keep a 100 Hz timer alive.
+void evt_pid_tick(WDFTIMER timer) {
+  auto *const context = get_device_context(
+    reinterpret_cast<WDFDEVICE>(WdfTimerGetParentObject(timer)));
+  if (context == nullptr) {
+    return;
+  }
+
+  bool still_playing = false;
+  lock_context(context);
+  for (auto &slot : context->controllers) {
+    if (slot.state != slot_state::active || !slot.force_feedback) {
+      continue;
+    }
+    slot.pid.advance(static_cast<std::uint32_t>(k_pid_tick_ms));
+    publish_pid_rumble(&slot);
+    still_playing = still_playing || slot.pid.needs_tick();
+  }
+  const bool stopping = context->stopping;
+  unlock_context(context);
+
+  if (!still_playing || stopping) {
+    // A timer may stop itself; passing FALSE keeps this from waiting on the
+    // callback it is already running inside.
+    WdfTimerStop(timer, FALSE);
   }
 }
 
@@ -622,6 +923,7 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
 
   lock_lifetime(context);
   lock_context(context);
+  const WDFTIMER timer = context->pid_timer;
   context->stopping = true;
   context->vhf_file_handle = nullptr;
   if (forget_target) {
@@ -645,6 +947,11 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
     if (handle != nullptr) {
       VhfDelete(handle, TRUE);
     }
+  }
+
+  // Stopped outside state_lock because the tick callback acquires it.
+  if (timer != nullptr) {
+    WdfTimerStop(timer, TRUE);
   }
   unlock_lifetime(context);
 }
@@ -734,6 +1041,18 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
     context->controllers[index].parent = context;
     context->controllers[index].controller_id = index;
     context->controllers[index].state = slot_state::empty;
+  }
+
+  WDF_TIMER_CONFIG timer_config;
+  WDF_TIMER_CONFIG_INIT_PERIODIC(&timer_config, evt_pid_tick, k_pid_tick_ms);
+  timer_config.AutomaticSerialization = FALSE;
+  WDF_OBJECT_ATTRIBUTES timer_attributes;
+  WDF_OBJECT_ATTRIBUTES_INIT(&timer_attributes);
+  timer_attributes.ParentObject = device;
+  timer_attributes.ExecutionLevel = WdfExecutionLevelPassive;
+  status = WdfTimerCreate(&timer_config, &timer_attributes, &context->pid_timer);
+  if (!NT_SUCCESS(status)) {
+    return status;
   }
 
   WDF_OBJECT_ATTRIBUTES lifetime_attributes;

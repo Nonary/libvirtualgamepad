@@ -3,6 +3,8 @@
 
 #include "profile.h"
 
+#include "pid_ff.h"
+
 #include <cstring>
 #include <iterator>
 
@@ -66,11 +68,44 @@ constexpr std::uint8_t k_generic_gamepad_descriptor[] = {
   0xC0,              // End Collection
 };
 
+// pid.codes holds VID 0x1209 for open-source projects and documents 0x0001 as
+// its test product ID. It is deliberately not a real vendor's identity. Request
+// an allocated product ID from pid.codes before a wide release so two different
+// virtual devices cannot collide on the same identity.
+inline constexpr std::uint16_t k_vibeshine_vendor_id = 0x1209;
+inline constexpr std::uint16_t k_vibeshine_product_id = 0x0001;
+inline constexpr std::uint16_t k_vibeshine_version = 0x0100;
+
 constexpr profile_definition k_generic_profile {
   profile::generic_hid,
   k_generic_gamepad_descriptor,
   sizeof(k_generic_gamepad_descriptor),
+  k_vibeshine_vendor_id,
+  k_vibeshine_product_id,
+  k_vibeshine_version,
+  false,
 };
+
+// The same game pad, plus the DirectInput PID report set. Kept as its own
+// profile so the plain descriptor stays available: if a host's HID stack
+// rejects the much larger PID descriptor, the caller can fall back without a
+// driver downgrade.
+//
+// The descriptor lives in another translation unit, so this is built once by a
+// thread-safe local static rather than by mutating a shared definition.
+[[nodiscard]] const profile_definition &generic_pid_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::generic_pid;
+    value.report_descriptor = pid_gamepad_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_vibeshine_vendor_id;
+    value.product_id = k_vibeshine_product_id;
+    value.version_number = k_vibeshine_version;
+    value.force_feedback = true;
+    return value;
+  }();
+  return definition;
+}
 
 std::uint8_t encode_hat(const std::uint32_t buttons) noexcept {
   const bool up = (buttons & button_mask::dpad_up) != 0;
@@ -126,6 +161,8 @@ const profile_definition *find_profile(const profile id) noexcept {
   switch (id) {
     case profile::generic_hid:
       return &k_generic_profile;
+    case profile::generic_pid:
+      return &generic_pid_profile();
     case profile::xbox_360:
     case profile::xbox_one:
     case profile::xbox_series:

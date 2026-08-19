@@ -47,6 +47,16 @@ struct profile_definition {
   profile id;
   const std::uint8_t *report_descriptor;
   std::size_t report_descriptor_size;
+  // VHF leaves these zero unless the driver supplies them, which leaves the HID
+  // child with no identity for Windows PnP or for applications that match on
+  // one. They are never a real vendor's identifiers: a descriptor is not
+  // relabelled as somebody else's product by changing a VID/PID.
+  std::uint16_t vendor_id;
+  std::uint16_t product_id;
+  std::uint16_t version_number;
+  // True when the profile publishes the DirectInput PID report set and its
+  // output and feature reports must be routed to the force-feedback engine.
+  bool force_feedback;
 };
 
 // Returns nullptr until a profile has passed descriptor, output, and

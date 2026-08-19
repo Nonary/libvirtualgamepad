@@ -37,6 +37,7 @@ The target profile set is deliberately explicit:
 | Profile | Contract |
 | --- | --- |
 | Generic HID | Standard HID Game Pad; implemented first. |
+| Generic HID + PID | The same game pad plus the DirectInput Physical Interface Device report set, so DirectInput reports the device as force-feedback capable. |
 | Xbox 360 | Requires a separately validated XUSB-compatible path. VHF alone is HID, not XInput. |
 | Xbox One | Requires a separately validated XUSB/GIP-compatible path. |
 | Xbox Series | Requires a separately validated XUSB/GIP-compatible path. |
@@ -137,3 +138,51 @@ control protocol, controller cleanup, and generic HID feedback path. It
 currently exposes 32 HID buttons, a hat switch, four signed axes, and two
 triggers. Adding a new profile is a driver change with descriptor and
 compatibility tests, not a configuration-only branding change.
+
+## Device identity
+
+VHF leaves a HID child's VID/PID at zero unless the driver supplies them, which
+gives Windows and applications nothing to match on. Profiles therefore carry an
+identity, taken from the pid.codes open-source vendor ID (`0x1209`) with its
+documented test product ID. That identity is deliberately not a real vendor's:
+a descriptor is never relabelled as somebody else's product by changing a
+VID/PID. Request an allocated product ID from pid.codes before a wide release
+so two virtual devices cannot collide.
+
+## Force feedback
+
+`profile::generic_pid` publishes the DirectInput PID report set alongside the
+game pad collection: Set Effect, Set Envelope, Set Condition, Set Periodic, Set
+Constant Force, Set Ramp Force, Effect Operation, PID Block Free, PID Device
+Control, and Device Gain as output reports, plus Create New Effect, PID Block
+Load, and PID Pool as feature reports, and a PID State input report. Windows
+only reports `DIDC_FORCEFEEDBACK` when that set parses, so a plain
+vendor-defined output report never reaches a DirectInput application.
+
+The driver reduces effects to the same rumble values the rest of the protocol
+already carries. Constant force and ramps drive the low-frequency motor;
+periodic effects drive the high-frequency motor at their magnitude, because a
+rumble actuator cannot render a waveform but its amplitude is what the
+application wants felt. Envelope attack and fade, per-effect gain, device gain,
+start delay, duration, and loop count are honored, and finite effects stop
+themselves so a host that never sends a stop cannot leave the motors running.
+Condition effects (spring, damper, inertia, friction) depend on stick position
+and have no rumble analogue, so they are accepted and produce nothing rather
+than inventing vibration.
+
+Feedback from a PID effect is reported as `feedback_type::generic_rumble`
+rather than `generic_rumble_rgb`: a force says nothing about a light, and
+forwarding a black LED would switch off the light on a client's real
+controller.
+
+A malformed report descriptor does not fail loudly - `VhfCreate` succeeds and
+the HID child simply never starts. `driver/tests/test_pid_descriptor.cpp` walks
+the descriptor the way HIDCLASS does and proves that every report's bit layout
+matches the packed struct the driver copies into, so that class of error is
+caught before it reaches a test machine:
+
+```powershell
+g++ -std=c++20 -I driver/src -I include `
+  driver/tests/test_pid_descriptor.cpp driver/src/pid_ff.cpp -o pid_test
+./pid_test
+```
