@@ -21,6 +21,7 @@
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
+#include "report_pump.h"
 #include "switch_pro.h"
 #include "xbox_series.h"
 
@@ -74,6 +75,12 @@ struct controller_slot {
   lvg::driver::ds4_state ds4;
   lvg::driver::ds5_state ds5;
   lvg::driver::switch_state switch_pro;
+  // Paces input reports so reads do not always complete instantly, which would
+  // leave a polling application spinning.
+  lvg::driver::report_pump pump;
+  // VHF does not copy these, so they live for as long as the child does.
+  GUID container_id;
+  wchar_t instance_id[32];
   // Zeroed by reset_slot and initialized by create_controller: WDF allocates
   // the device context as raw memory, so no constructor runs for this member.
   pid_engine pid;
@@ -106,6 +113,8 @@ EVT_WDF_FILE_CLOSE evt_file_close;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL evt_io_device_control;
 EVT_VHF_ASYNC_OPERATION evt_vhf_write_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_get_feature;
+EVT_VHF_ASYNC_OPERATION evt_vhf_get_input_report;
+EVT_VHF_READY_FOR_NEXT_READ_REPORT evt_vhf_ready_for_next_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_set_feature;
 EVT_VHF_CLEANUP evt_vhf_cleanup;
 EVT_WDF_TIMER evt_pid_tick;
@@ -113,6 +122,37 @@ EVT_WDF_TIMER evt_pid_tick;
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
 [[nodiscard]] bool is_playstation(lvg::profile profile) noexcept;
+
+// Base for each controller's container identity. The low byte is replaced with
+// the controller index so every slot is its own physical device to Windows.
+constexpr GUID k_controller_container_base {
+  0x9a2f1c74,
+  0x6b83,
+  0x4d51,
+  {0xa7, 0x0e, 0x35, 0x1d, 0xc6, 0x84, 0x00, 0x00}
+};
+
+// Writes "VibeshineGamepad<n>" without pulling in a formatting library.
+void format_instance_id(wchar_t *const out, const std::size_t capacity, const std::uint32_t index) noexcept {
+  constexpr wchar_t prefix[] = L"VibeshineGamepad";
+  const std::size_t prefix_length = RTL_NUMBER_OF(prefix) - 1;
+  if (capacity < prefix_length + 4) {
+    if (capacity > 0) {
+      out[0] = L'\0';
+    }
+    return;
+  }
+
+  std::size_t position = 0;
+  for (; position < prefix_length; ++position) {
+    out[position] = prefix[position];
+  }
+  if (index >= 10) {
+    out[position++] = static_cast<wchar_t>(L'0' + (index / 10) % 10);
+  }
+  out[position++] = static_cast<wchar_t>(L'0' + index % 10);
+  out[position] = L'\0';
+}
 
 void lock_context(device_context *const context) noexcept {
   WdfWaitLockAcquire(context->state_lock, nullptr);
@@ -294,6 +334,7 @@ void destroy_owned_controller(
   slot.ds4.reset();
   slot.ds5.reset();
   slot.switch_pro.reset();
+  slot.pump.reset();
   unlock_context(context);
 
   // The start path already opens this target. Retrying here keeps a source
@@ -325,6 +366,24 @@ void destroy_owned_controller(
   config.VhfClientContext = &slot;
   config.EvtVhfAsyncOperationWriteReport = evt_vhf_write_report;
   config.EvtVhfCleanup = evt_vhf_cleanup;
+  // Without this the driver never learns when VHF will take another report and
+  // has to guess, which is what makes a device readable without pause.
+  config.EvtVhfReadyForNextReadReport = evt_vhf_ready_for_next_report;
+  // Answers HidD_GetInputReport, which some applications use to read an initial
+  // state instead of waiting for the first change.
+  config.EvtVhfAsyncOperationGetInputReport = evt_vhf_get_input_report;
+
+  // Give each controller its own identity. Sharing the parent's container makes
+  // several controllers look like one device to anything that groups by
+  // physical device, and without a distinct instance two controllers of the
+  // same model can collide on their device path.
+  slot.container_id = k_controller_container_base;
+  slot.container_id.Data4[7] = static_cast<UCHAR>(request.controller_id);
+  config.ContainerID = slot.container_id;
+  format_instance_id(slot.instance_id, RTL_NUMBER_OF(slot.instance_id), request.controller_id);
+  config.InstanceID = slot.instance_id;
+  config.InstanceIDLength =
+    static_cast<USHORT>((wcslen(slot.instance_id) + 1) * sizeof(wchar_t));
   // Without an identity the HID child enumerates as VID/PID 0000:0000, which
   // leaves Windows and applications nothing to match on.
   config.VendorID = definition->vendor_id;
@@ -406,6 +465,81 @@ void destroy_owned_controller(
   return STATUS_SUCCESS;
 }
 
+// Hands one report to VHF if it can take it now, otherwise leaves it queued for
+// the readiness callback. Takes state_lock itself and must be called without
+// it. The lifetime gate is deliberately not taken: this also runs from inside
+// VHF callbacks, where the handle is already guaranteed alive because VhfDelete
+// waits for the callback, and taking the gate there would deadlock that wait.
+NTSTATUS pump_report(
+  device_context *const context,
+  controller_slot &slot,
+  const void *const data,
+  const ULONG length,
+  const UCHAR report_id,
+  const lvg::driver::report_kind kind) noexcept {
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
+  VHFHANDLE vhf = nullptr;
+
+  lock_context(context);
+  if (context->stopping || slot.state != slot_state::active || slot.vhf == nullptr) {
+    unlock_context(context);
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (data != nullptr) {
+    std::ignore = slot.pump.enqueue(data, length, report_id, kind);
+  }
+  have_next = slot.pump.take(&next);
+  vhf = slot.vhf;
+  unlock_context(context);
+
+  if (!have_next) {
+    return STATUS_SUCCESS;
+  }
+
+  HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
+  const NTSTATUS status = VhfReadReportSubmit(vhf, &transfer);
+  if (!NT_SUCCESS(status)) {
+    // The report was consumed from the pump; put readiness back so the next
+    // submission is not stranded behind a failure that has already passed.
+    lock_context(context);
+    slot.pump.set_ready();
+    unlock_context(context);
+  }
+  return status;
+}
+
+// VHF can accept another report. Drain one, preferring initialization replies,
+// then ordered transitions, then the newest continuous state.
+void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
+  auto *const slot = static_cast<controller_slot *>(vhf_client_context);
+  if (slot == nullptr || slot->parent == nullptr) {
+    return;
+  }
+
+  lvg::driver::report_buffer next {};
+  bool have_next = false;
+  VHFHANDLE vhf = nullptr;
+
+  auto *const context = slot->parent;
+  lock_context(context);
+  slot->pump.set_ready();
+  if (!context->stopping && slot->state == slot_state::active) {
+    have_next = slot->pump.take(&next);
+    vhf = slot->vhf;
+  }
+  unlock_context(context);
+
+  if (have_next && vhf != nullptr) {
+    HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
+    if (!NT_SUCCESS(VhfReadReportSubmit(vhf, &transfer))) {
+      lock_context(context);
+      slot->pump.set_ready();
+      unlock_context(context);
+    }
+  }
+}
+
 // True when the profile folds touch, motion, and battery into its input report.
 [[nodiscard]] bool is_playstation(const lvg::profile profile) noexcept {
   return profile == lvg::profile::dualshock_4 || profile == lvg::profile::dualsense;
@@ -431,25 +565,29 @@ void destroy_owned_controller(
     return STATUS_SUCCESS;
   }
 
-  const VHFHANDLE vhf = slot.vhf;
-  HID_XFER_PACKET transfer {};
   ds4_input_report ds4_report {};
   ds5_input_report ds5_report {};
+  const void *data = nullptr;
+  ULONG length = 0;
+  UCHAR report_id = 0;
 
   if (slot.selected_profile == lvg::profile::dualshock_4) {
     ds4_report = encode_ds4_input(slot.last_input, &slot.ds4);
-    transfer.reportBuffer = reinterpret_cast<PUCHAR>(&ds4_report);
-    transfer.reportBufferLen = sizeof(ds4_report);
-    transfer.reportId = k_ds4_input_report_id;
+    data = &ds4_report;
+    length = sizeof(ds4_report);
+    report_id = k_ds4_input_report_id;
   } else {
     ds5_report = encode_ds5_input(slot.last_input, &slot.ds5);
-    transfer.reportBuffer = reinterpret_cast<PUCHAR>(&ds5_report);
-    transfer.reportBufferLen = sizeof(ds5_report);
-    transfer.reportId = k_ds5_input_report_id;
+    data = &ds5_report;
+    length = sizeof(ds5_report);
+    report_id = k_ds5_input_report_id;
   }
   unlock_context(context);
 
-  return VhfReadReportSubmit(vhf, &transfer);
+  // Rebuilt from state a touch, motion or battery event changed, so the
+  // discrete part is unchanged and only the newest one matters.
+  return pump_report(context, slot, data, length, report_id,
+                     lvg::driver::report_kind::continuous);
 }
 
 // Resends the current state for whichever profile owns the slot. Touch, motion
@@ -474,15 +612,11 @@ void destroy_owned_controller(
 
   const lvg::driver::switch_input_report report =
     lvg::driver::encode_switch_input(slot.last_input, &slot.switch_pro);
-  HID_XFER_PACKET transfer {
-    reinterpret_cast<PUCHAR>(const_cast<lvg::driver::switch_input_report *>(&report)),
-    sizeof(report),
-    lvg::driver::k_switch_input_report_id,
-  };
-  const VHFHANDLE vhf = slot.vhf;
   unlock_context(context);
 
-  return VhfReadReportSubmit(vhf, &transfer);
+  return pump_report(context, slot, &report, sizeof(report),
+                     lvg::driver::k_switch_input_report_id,
+                     lvg::driver::report_kind::continuous);
 }
 
 // Shared preamble for the touch, motion, and battery IOCTLs: validate the
@@ -633,8 +767,29 @@ void destroy_owned_controller(
   if (is_playstation(slot.selected_profile)) {
     slot.last_input = request;
     slot.have_last_input = true;
+    using namespace lvg::driver;
+
+    const auto ps_kind =
+      slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
+    ds4_input_report ds4_report {};
+    ds5_input_report ds5_report {};
+    const void *ps_data = nullptr;
+    ULONG ps_length = 0;
+    UCHAR ps_report_id = 0;
+    if (slot.selected_profile == lvg::profile::dualshock_4) {
+      ds4_report = encode_ds4_input(request, &slot.ds4);
+      ps_data = &ds4_report;
+      ps_length = sizeof(ds4_report);
+      ps_report_id = k_ds4_input_report_id;
+    } else {
+      ds5_report = encode_ds5_input(request, &slot.ds5);
+      ps_data = &ds5_report;
+      ps_length = sizeof(ds5_report);
+      ps_report_id = k_ds5_input_report_id;
+    }
     unlock_context(context);
-    const NTSTATUS ps_status = submit_playstation_report(context, slot);
+    const NTSTATUS ps_status =
+      pump_report(context, slot, ps_data, ps_length, ps_report_id, ps_kind);
     unlock_lifetime(context);
     return ps_status;
   }
@@ -644,15 +799,12 @@ void destroy_owned_controller(
     slot.have_last_input = true;
     const lvg::driver::switch_input_report switch_report =
       lvg::driver::encode_switch_input(request, &slot.switch_pro);
-    HID_XFER_PACKET switch_transfer {
-      reinterpret_cast<PUCHAR>(const_cast<lvg::driver::switch_input_report *>(&switch_report)),
-      sizeof(switch_report),
-      lvg::driver::k_switch_input_report_id,
-    };
-
-    const VHFHANDLE switch_vhf = slot.vhf;
+    const auto switch_kind =
+      slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
     unlock_context(context);
-    const NTSTATUS switch_status = VhfReadReportSubmit(switch_vhf, &switch_transfer);
+    const NTSTATUS switch_status =
+      pump_report(context, slot, &switch_report, sizeof(switch_report),
+                  lvg::driver::k_switch_input_report_id, switch_kind);
     unlock_lifetime(context);
     return switch_status;
   }
@@ -660,15 +812,12 @@ void destroy_owned_controller(
   if (slot.selected_profile == lvg::profile::xbox_series) {
     const lvg::driver::xbox_series_input_report xbox_report =
       lvg::driver::encode_xbox_series_input(request);
-    HID_XFER_PACKET xbox_transfer {
-      reinterpret_cast<PUCHAR>(const_cast<lvg::driver::xbox_series_input_report *>(&xbox_report)),
-      sizeof(xbox_report),
-      lvg::driver::k_xbox_series_input_report_id,
-    };
-
-    const VHFHANDLE xbox_vhf = slot.vhf;
+    const auto xbox_kind =
+      slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
     unlock_context(context);
-    const NTSTATUS xbox_status = VhfReadReportSubmit(xbox_vhf, &xbox_transfer);
+    const NTSTATUS xbox_status =
+      pump_report(context, slot, &xbox_report, sizeof(xbox_report),
+                  lvg::driver::k_xbox_series_input_report_id, xbox_kind);
     unlock_lifetime(context);
     return xbox_status;
   }
@@ -681,18 +830,12 @@ void destroy_owned_controller(
   }
 
   const generic_input_report report = encode_generic_input(request);
-  HID_XFER_PACKET transfer {
-    reinterpret_cast<PUCHAR>(const_cast<generic_input_report *>(&report)),
-    sizeof(report),
-    k_generic_input_report_id,
-  };
-
-  const VHFHANDLE vhf = slot.vhf;
+  const auto kind =
+    slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
   unlock_context(context);
 
-  // Default VHF buffering permits this synchronous submit. The lifetime gate
-  // keeps VhfDelete and target cleanup from invalidating vhf or FileHandle.
-  const NTSTATUS status = VhfReadReportSubmit(vhf, &transfer);
+  const NTSTATUS status = pump_report(context, slot, &report, sizeof(report),
+                                      k_generic_input_report_id, kind);
   unlock_lifetime(context);
   return status;
 }
@@ -916,8 +1059,10 @@ void evt_vhf_write_report(
     // callback to return, so the handle cannot go away underneath it, and
     // taking the gate here would deadlock against that wait.
     if (NT_SUCCESS(status) && reply_size != 0 && vhf != nullptr) {
-      HID_XFER_PACKET reply_transfer {reply_buffer, reply_size, reply_id};
-      std::ignore = VhfReadReportSubmit(vhf, &reply_transfer);
+      // A host blocked on a handshake reply is not streaming yet, so this goes
+      // ahead of any controller state already waiting.
+      std::ignore = pump_report(context, *slot, reply_buffer, reply_size, reply_id,
+                                lvg::driver::report_kind::priority);
     }
 
     if (operation_handle != nullptr) {
@@ -1186,6 +1331,88 @@ void evt_pid_tick(WDFTIMER timer) {
     // A timer may stop itself; passing FALSE keeps this from waiting on the
     // callback it is already running inside.
     WdfTimerStop(timer, FALSE);
+  }
+}
+
+// A host can ask for the current state instead of waiting for the next change.
+// Answering from the last submitted state keeps that read consistent with what
+// the stream has already reported.
+void evt_vhf_get_input_report(
+  PVOID vhf_client_context,
+  VHFOPERATIONHANDLE operation_handle,
+  PVOID,
+  PHID_XFER_PACKET transfer) {
+  using namespace lvg::driver;
+
+  auto *const slot = static_cast<controller_slot *>(vhf_client_context);
+  NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      transfer->reportBuffer != nullptr) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else {
+      // Buffer big enough for the largest report any profile produces.
+      std::uint8_t buffer[k_max_report_bytes] {};
+      std::size_t length = 0;
+      std::uint8_t report_id = 0;
+
+      switch (slot->selected_profile) {
+        case lvg::profile::dualshock_4: {
+          const ds4_input_report report = encode_ds4_input(slot->last_input, &slot->ds4);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_ds4_input_report_id;
+          break;
+        }
+        case lvg::profile::dualsense: {
+          const ds5_input_report report = encode_ds5_input(slot->last_input, &slot->ds5);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_ds5_input_report_id;
+          break;
+        }
+        case lvg::profile::switch_pro: {
+          const switch_input_report report =
+            encode_switch_input(slot->last_input, &slot->switch_pro);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_switch_input_report_id;
+          break;
+        }
+        case lvg::profile::xbox_series: {
+          const xbox_series_input_report report = encode_xbox_series_input(slot->last_input);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_xbox_series_input_report_id;
+          break;
+        }
+        default: {
+          const generic_input_report report = encode_generic_input(slot->last_input);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_generic_input_report_id;
+          break;
+        }
+      }
+
+      // A request naming a different report is not one this device can answer.
+      if (transfer->reportId != 0 && transfer->reportId != report_id) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+      } else if (transfer->reportBufferLen < length) {
+        status = STATUS_BUFFER_TOO_SMALL;
+      } else {
+        std::memcpy(transfer->reportBuffer, buffer, length);
+        status = STATUS_SUCCESS;
+      }
+    }
+    unlock_context(context);
+  }
+
+  if (operation_handle != nullptr) {
+    VhfAsyncOperationComplete(operation_handle, status);
   }
 }
 

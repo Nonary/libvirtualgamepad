@@ -16,6 +16,7 @@
 #include "dualshock4.h"
 #include "pid_ff.h"
 #include "profile.h"
+#include "report_pump.h"
 #include "switch_pro.h"
 #include "xbox_series.h"
 
@@ -1137,6 +1138,125 @@ int main() {
     foreign_rumble[0] = 0x42;
     check(!decode_switch_rumble(foreign_rumble, sizeof(foreign_rumble), &feedback),
           "a foreign report id is rejected");
+  }
+
+  {
+    // ---- report pacing ----
+    report_pump pump;
+    pump.reset();
+    check(pump.ready(), "a fresh pump can send immediately");
+    check(pump.empty(), "a fresh pump has nothing waiting");
+
+    const std::uint8_t a[4] = {1, 0, 0, 0};
+    const std::uint8_t b[4] = {2, 0, 0, 0};
+    const std::uint8_t c[4] = {3, 0, 0, 0};
+    report_buffer out {};
+
+    // The first report goes out without waiting for a readiness signal, which
+    // only ever arrives after a submission.
+    check(pump.enqueue(a, sizeof(a), 1, report_kind::continuous), "first enqueue");
+    check(pump.take(&out), "first report is taken");
+    check(out.data[0] == 1, "first report is the one enqueued");
+    check(!pump.ready(), "taking a report consumes readiness");
+    check(!pump.take(&out), "nothing more is sent until VHF is ready again");
+
+    // While waiting, newer continuous state replaces older: a consumer that
+    // was busy should see where the stick is now, not where it was.
+    check(pump.enqueue(b, sizeof(b), 1, report_kind::continuous), "second continuous");
+    check(pump.enqueue(c, sizeof(c), 1, report_kind::continuous), "third continuous");
+    pump.set_ready();
+    check(pump.take(&out), "a report is waiting");
+    check(out.data[0] == 3, "the newest continuous state is sent, got " + std::to_string(out.data[0]));
+    pump.set_ready();
+    check(!pump.take(&out), "the superseded state was not also queued");
+  }
+
+  {
+    // Transitions must survive: dropping one loses a press or a release.
+    report_pump pump;
+    pump.reset();
+    report_buffer out {};
+    const std::uint8_t press[2] = {0xA1, 0};
+    const std::uint8_t release[2] = {0xA0, 0};
+    const std::uint8_t moving[2] = {0xB0, 0};
+
+    check(pump.enqueue(press, sizeof(press), 1, report_kind::transition), "press");
+    check(pump.take(&out) && out.data[0] == 0xA1, "press sent");
+
+    check(pump.enqueue(release, sizeof(release), 1, report_kind::transition), "release");
+    check(pump.enqueue(moving, sizeof(moving), 1, report_kind::continuous), "movement");
+    pump.set_ready();
+    check(pump.take(&out), "something is waiting");
+    check(out.data[0] == 0xA0, "the release is sent before newer movement");
+    pump.set_ready();
+    check(pump.take(&out) && out.data[0] == 0xB0, "movement follows");
+  }
+
+  {
+    // Initialization replies go ahead of controller state.
+    report_pump pump;
+    pump.reset();
+    report_buffer out {};
+    const std::uint8_t state[2] = {0x30, 0};
+    const std::uint8_t reply[2] = {0x21, 0};
+
+    check(pump.take(&out) == false, "nothing to send yet");
+    check(pump.enqueue(state, sizeof(state), 0x30, report_kind::transition), "state queued");
+    check(pump.enqueue(reply, sizeof(reply), 0x21, report_kind::priority), "reply queued");
+    check(pump.take(&out), "a report is taken");
+    check(out.report_id == 0x21, "the handshake reply goes first");
+    pump.set_ready();
+    check(pump.take(&out) && out.report_id == 0x30, "controller state follows");
+  }
+
+  {
+    // A stalled consumer must not be able to strand a button down. When the
+    // queue fills, the oldest transition is dropped, so a lost press whose
+    // release is still queued reads as released rather than held.
+    report_pump pump;
+    pump.reset();
+    report_buffer out {};
+    std::uint8_t payload[2] = {0, 0};
+
+    check(pump.enqueue(payload, sizeof(payload), 1, report_kind::transition), "prime");
+    check(pump.take(&out), "prime sent");
+
+    for (int i = 0; i < k_transition_capacity + 4; ++i) {
+      payload[0] = static_cast<std::uint8_t>(i);
+      std::ignore = pump.enqueue(payload, sizeof(payload), 1, report_kind::transition);
+    }
+    check(pump.transitions_waiting() == k_transition_capacity, "the queue is bounded");
+    check(pump.dropped_transitions() == 4, "the overflow was counted, got " +
+                                             std::to_string(pump.dropped_transitions()));
+
+    // Whatever was dropped, the newest transition still arrives, so the final
+    // state is right.
+    std::uint8_t last = 0;
+    for (int i = 0; i < k_transition_capacity; ++i) {
+      pump.set_ready();
+      if (pump.take(&out)) {
+        last = out.data[0];
+      }
+    }
+    check(last == k_transition_capacity + 3,
+          "the newest transition survives, got " + std::to_string(last));
+  }
+
+  {
+    // Classification drives all of the above, so it has to agree with what a
+    // player would call a discrete change.
+    report_pump pump;
+    pump.reset();
+    check(pump.classify(0, 0, 0) == report_kind::transition,
+          "the first state is always a transition");
+    check(pump.classify(0, 0, 0) == report_kind::continuous, "an unchanged state is continuous");
+    check(pump.classify(button_mask::south, 0, 0) == report_kind::transition, "a press is discrete");
+    check(pump.classify(button_mask::south, 0, 0) == report_kind::continuous, "holding is not");
+    check(pump.classify(0, 0, 0) == report_kind::transition, "a release is discrete");
+    // Analog travel is continuous until it crosses the digital threshold.
+    check(pump.classify(0, 40, 0) == report_kind::transition, "a trigger leaving rest is discrete");
+    check(pump.classify(0, 200, 0) == report_kind::continuous, "further travel is continuous");
+    check(pump.classify(0, 0, 0) == report_kind::transition, "a trigger returning to rest is discrete");
   }
 
   if (g_failures == 0) {
