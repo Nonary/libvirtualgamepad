@@ -111,6 +111,29 @@ static_assert(sizeof(ds5_input_report) == 64);
 static_assert(sizeof(ds5_trigger_effect) == 11);
 static_assert(sizeof(ds5_output_report) == 48);
 
+// Output-report field positions, checked against the byte offsets a DualSense
+// actually uses rather than against this struct's own layout. Sizes alone do
+// not catch a transposed pair of fields, and nothing about a wrong offset is
+// visible at runtime: the light bar simply lights the wrong colour or a rumble
+// motor never spins.
+static_assert(offsetof(ds5_output_report, report_id) == 0);
+static_assert(offsetof(ds5_output_report, valid_flag0) == 1);
+static_assert(offsetof(ds5_output_report, valid_flag1) == 2);
+static_assert(offsetof(ds5_output_report, motor_right) == 3);
+static_assert(offsetof(ds5_output_report, motor_left) == 4);
+static_assert(offsetof(ds5_output_report, mute_button_led) == 9);
+static_assert(offsetof(ds5_output_report, power_save_control) == 10);
+// Right precedes left, matching the order of the two enable bits in flag0.
+static_assert(offsetof(ds5_output_report, right_trigger) == 11);
+static_assert(offsetof(ds5_output_report, left_trigger) == 22);
+static_assert(offsetof(ds5_output_report, valid_flag2) == 39);
+static_assert(offsetof(ds5_output_report, lightbar_setup) == 42);
+static_assert(offsetof(ds5_output_report, led_brightness) == 43);
+static_assert(offsetof(ds5_output_report, player_leds) == 44);
+static_assert(offsetof(ds5_output_report, lightbar_red) == 45);
+static_assert(offsetof(ds5_output_report, lightbar_green) == 46);
+static_assert(offsetof(ds5_output_report, lightbar_blue) == 47);
+
 struct ds5_state {
   std::uint8_t sequence;
   std::uint32_t sensor_timestamp;

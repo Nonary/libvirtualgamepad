@@ -1259,6 +1259,116 @@ int main() {
     check(pump.classify(0, 0, 0) == report_kind::transition, "a trigger returning to rest is discrete");
   }
 
+  {
+    // ---- PlayStation output reports, built from raw bytes ----
+    // These buffers are filled at literal byte offsets rather than through the
+    // report structs, so the test still fails if a struct field moves. Decoding
+    // our own encoding would only prove the code agrees with itself; the point
+    // here is that it agrees with the console.
+    check(k_ds5_output_report_id == 0x02, "the DualSense output report is 0x02");
+
+    std::uint8_t raw[48] {};
+    raw[0] = 0x02;  // report id
+    raw[1] = 0x01 | 0x04 | 0x08;  // flag0: vibration, right trigger, left trigger
+    raw[2] = 0x01 | 0x04 | 0x10;  // flag1: mic LED, light bar, player indicator
+    raw[3] = 0x40;  // motor_right - the small, high frequency motor
+    raw[4] = 0x80;  // motor_left  - the large, low frequency motor
+    raw[9] = 0x01;  // mute button LED
+    raw[11] = 0x26;  // right trigger effect mode
+    raw[12] = 0xAA;  // first right trigger parameter
+    raw[22] = 0x21;  // left trigger effect mode
+    raw[23] = 0xBB;  // first left trigger parameter
+    raw[44] = 0x05;  // player LEDs
+    raw[45] = 0x10;  // red
+    raw[46] = 0x20;  // green
+    raw[47] = 0x30;  // blue
+
+    ds5_output_report ds5 {};
+    std::memcpy(&ds5, raw, sizeof(ds5));
+    playstation_output_feedback fb {};
+    check(decode_ds5_output(ds5, &fb), "a DualSense output report decodes");
+
+    // Left drives the low frequency motor and right the high, which is the
+    // pairing every PlayStation pad uses. Swapping them puts a heavy rumble
+    // where a game asked for a light one.
+    check(fb.low_frequency == 0x8000, "motor_left becomes the low frequency motor");
+    check(fb.high_frequency == 0x4000, "motor_right becomes the high frequency motor");
+    check(fb.red == 0x10 && fb.green == 0x20 && fb.blue == 0x30, "the light bar colour survives");
+    check((fb.valid & ps_output_lightbar_valid) != 0, "the light bar is marked valid");
+    check(fb.player_leds == 0x05, "the player LEDs survive");
+    check((fb.valid & ps_output_player_leds_valid) != 0, "the player LEDs are marked valid");
+    check(fb.microphone_led == 0x01, "the microphone LED survives");
+    check((fb.valid & ps_output_microphone_led_valid) != 0, "the microphone LED is marked valid");
+    check(fb.right_trigger.mode == 0x26, "the right trigger effect is not the left one");
+    check(fb.right_trigger.parameters[0] == 0xAA, "the right trigger parameters follow its mode");
+    check(fb.left_trigger.mode == 0x21, "the left trigger effect is not the right one");
+    check(fb.left_trigger.parameters[0] == 0xBB, "the left trigger parameters follow its mode");
+    check((fb.valid & ps_output_triggers_valid) != 0, "the trigger effects are marked valid");
+
+    // A report that enables nothing must not carry the previous program
+    // forward, or a released effect stays armed.
+    std::uint8_t idle[48] {};
+    idle[0] = 0x02;
+    idle[3] = 0x40;
+    idle[4] = 0x80;
+    idle[45] = 0x10;
+    ds5_output_report quiet {};
+    std::memcpy(&quiet, idle, sizeof(quiet));
+    playstation_output_feedback quiet_fb {};
+    check(decode_ds5_output(quiet, &quiet_fb), "an output report with no enable bits decodes");
+    check(quiet_fb.low_frequency == 0 && quiet_fb.high_frequency == 0,
+          "rumble is ignored without its enable bit");
+    check(quiet_fb.red == 0, "the light bar is ignored without its enable bit");
+    check(quiet_fb.valid == 0, "nothing is marked valid");
+    check(quiet_fb.left_trigger.mode == 0 && quiet_fb.right_trigger.mode == 0,
+          "trigger effects reset rather than repeat");
+
+    // A foreign report id must be refused rather than parsed as ours.
+    ds5_output_report wrong {};
+    std::memcpy(&wrong, raw, sizeof(wrong));
+    wrong.report_id = 0x31;
+    playstation_output_feedback ignored {};
+    check(!decode_ds5_output(wrong, &ignored), "a foreign report id is refused");
+  }
+
+  {
+    // The DualShock 4 shares the pairing but has its own, smaller report.
+    check(k_ds4_output_report_id == 0x05, "the DualShock 4 output report is 0x05");
+
+    std::uint8_t raw[32] {};
+    raw[0] = 0x05;
+    raw[1] = 0x01 | 0x02;  // rumble and light bar
+    raw[4] = 0x30;  // right rumble
+    raw[5] = 0x90;  // left rumble
+    raw[6] = 0x11;
+    raw[7] = 0x22;
+    raw[8] = 0x33;
+
+    ds4_output_report ds4 {};
+    std::memcpy(&ds4, raw, sizeof(ds4));
+    playstation_output_feedback fb {};
+    check(decode_ds4_output(ds4, &fb), "a DualShock 4 output report decodes");
+    check(fb.low_frequency == 0x9000, "left drives the low frequency motor");
+    check(fb.high_frequency == 0x3000, "right drives the high frequency motor");
+    check(fb.red == 0x11 && fb.green == 0x22 && fb.blue == 0x33, "the light bar colour survives");
+    check((fb.valid & ps_output_lightbar_valid) != 0, "the light bar is marked valid");
+    // A DualShock 4 has no adaptive triggers, player LEDs or microphone LED.
+    check((fb.valid & ps_output_triggers_valid) == 0, "no trigger effects are claimed");
+    check((fb.valid & ps_output_player_leds_valid) == 0, "no player LEDs are claimed");
+
+    std::uint8_t idle[32] {};
+    idle[0] = 0x05;
+    idle[4] = 0x30;
+    idle[5] = 0x90;
+    ds4_output_report quiet {};
+    std::memcpy(&quiet, idle, sizeof(quiet));
+    playstation_output_feedback quiet_fb {};
+    check(decode_ds4_output(quiet, &quiet_fb), "an output report with no enable bits decodes");
+    check(quiet_fb.low_frequency == 0 && quiet_fb.high_frequency == 0,
+          "rumble is ignored without its enable bit");
+    check(quiet_fb.valid == 0, "nothing is marked valid");
+  }
+
   if (g_failures == 0) {
     std::printf("all PID descriptor and engine checks passed\n");
     return 0;

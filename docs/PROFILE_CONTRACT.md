@@ -65,8 +65,33 @@ implemented and tested.
 
 ## PlayStation and Switch profiles
 
-`dualshock_4`, `dualsense`, and `switch_pro` remain unavailable until each has
-an independently derived descriptor and complete feedback/feature behavior.
-Those profiles may be HID-native, but still need their own output, touch,
-motion, battery, and compatibility validation. No source or proprietary assets
-from LizardByte's Windows driver are used as an implementation input.
+`dualshock_4`, `dualsense`, and `switch_pro` are implemented, each with an
+independently derived descriptor and its own feature behavior: calibration,
+pairing and firmware reads on the PlayStation pads, and the full USB handshake,
+subcommand set and emulated SPI flash on the Switch pad.
+
+Output reports are checked against the byte offsets the real controllers use,
+not against our own structs. `offsetof` assertions in `dualsense.h` and
+`dualshock4.h` pin every field, and the unit tests decode buffers filled at
+literal offsets, so a transposed pair of fields fails the build or the test
+rather than reaching a user. That distinction matters here because a wrong
+offset is invisible at runtime: the light bar simply lights the wrong colour, or
+a game's light rumble arrives on the heavy motor.
+
+The left motor is the low-frequency one and the right is the high-frequency one,
+on both pads. Only their report layouts differ.
+
+## How a host writes an output report
+
+Windows has two ways to send one, and this driver answers exactly one of them:
+
+- `WriteFile` on the device handle **works**. This is what hidapi and most
+  games use.
+- `HidD_SetOutputReport` is **refused** with `ERROR_NOT_SUPPORTED`. VHF offers a
+  write-report callback but none for the control-transfer path, so there is
+  nothing for the driver to answer with. A real controller accepts both.
+
+A host that only ever calls `HidD_SetOutputReport` therefore gets no rumble and
+no light bar, silently. Nothing in this repository can change that; it would
+take a VHF callback that does not exist. Worth knowing before chasing a
+"rumble does not work" report that turns out to be the host's choice of API.

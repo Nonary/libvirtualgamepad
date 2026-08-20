@@ -108,6 +108,17 @@ static_assert(sizeof(ds4_touch_packet) == 9);
 static_assert(sizeof(ds4_input_report) == 64);
 static_assert(sizeof(ds4_output_report) == 32);
 
+// As with the DualSense, these are the controller's byte offsets, not ours.
+static_assert(offsetof(ds4_output_report, report_id) == 0);
+static_assert(offsetof(ds4_output_report, flags) == 1);
+static_assert(offsetof(ds4_output_report, right_rumble) == 4);
+static_assert(offsetof(ds4_output_report, left_rumble) == 5);
+static_assert(offsetof(ds4_output_report, red) == 6);
+static_assert(offsetof(ds4_output_report, green) == 7);
+static_assert(offsetof(ds4_output_report, blue) == 8);
+static_assert(offsetof(ds4_output_report, flash_on) == 9);
+static_assert(offsetof(ds4_output_report, flash_off) == 10);
+
 // Per-controller state the profile accumulates between input submissions. A
 // DS4 report carries buttons, motion, touch, and battery together, so each of
 // those arrives on its own IOCTL and is folded into one report here.
