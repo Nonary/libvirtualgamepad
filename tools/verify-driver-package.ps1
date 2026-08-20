@@ -17,8 +17,23 @@ param(
 
     [string] $SignToolPath,
 
-    [switch] $AllowLocalTestCertificate
+    [switch] $AllowLocalTestCertificate,
+
+    # Write a manifest for a package that is shipped unsigned on purpose,
+    # because its catalog is signed downstream by the consuming installer's
+    # signing request. SignPath is authorised for Nonary/vibeshine and not for
+    # this repository, so a release here cannot carry a production signature.
+    #
+    # Everything except the signature checks still runs. The recorded hashes
+    # for the catalog and the root-device tool are pre-signature and will not
+    # match once those files are signed; the consumer knows to skip exactly
+    # those two and to require a valid signature on them instead.
+    [switch] $UnsignedForMsiSigning
 )
+
+if ($UnsignedForMsiSigning -and $AllowLocalTestCertificate) {
+    throw 'A package signed downstream cannot also be a local-test package.'
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -73,7 +88,7 @@ $usesLocalTestCertificate = $null -ne $testCertificate
 # A catalog is the release signature. Verify both the catalog itself and its
 # binding to the exact final INF and UMDF DLL. Do not re-sign this DLL after
 # the catalog has been created.
-if (-not $usesLocalTestCertificate) {
+if (-not $usesLocalTestCertificate -and -not $UnsignedForMsiSigning) {
     & $signTool verify '/v' '/pa' $catalog
     if ($LASTEXITCODE -ne 0) {
         throw "Catalog signature verification failed with exit code $LASTEXITCODE."
@@ -87,11 +102,12 @@ if (-not $usesLocalTestCertificate) {
     }
 }
 
-$catalogSignature = Get-AuthenticodeSignature -LiteralPath $catalog
-if ($null -eq $catalogSignature.SignerCertificate) {
+$catalogSignature = if ($UnsignedForMsiSigning) { $null } else { Get-AuthenticodeSignature -LiteralPath $catalog }
+if (-not $UnsignedForMsiSigning -and $null -eq $catalogSignature.SignerCertificate) {
     throw 'Catalog verification succeeded without an inspectable signer certificate.'
 }
-if ($catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+if (-not $UnsignedForMsiSigning -and
+    $catalogSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
     throw 'Catalog inspection reported a hash mismatch.'
 }
 if ($usesLocalTestCertificate -and $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()) {
@@ -100,24 +116,26 @@ if ($usesLocalTestCertificate -and $catalogSignature.SignerCertificate.Thumbprin
 
 # This executable creates/removes only the package-owned root device. It is
 # intentionally outside the catalog, so it must carry an embedded signature.
-if (-not $usesLocalTestCertificate) {
+if (-not $usesLocalTestCertificate -and -not $UnsignedForMsiSigning) {
     & $signTool verify '/v' '/pa' $deviceSetup
     if ($LASTEXITCODE -ne 0) {
         throw "Root-device setup tool signature verification failed with exit code $LASTEXITCODE."
     }
 }
-$deviceSetupSignature = Get-AuthenticodeSignature -LiteralPath $deviceSetup
-if ($null -eq $deviceSetupSignature.SignerCertificate) {
-    throw 'Root-device setup tool verification succeeded without an inspectable signer certificate.'
-}
-if ($deviceSetupSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
-    throw 'Root-device setup tool inspection reported a hash mismatch.'
+$deviceSetupSignature = if ($UnsignedForMsiSigning) { $null } else { Get-AuthenticodeSignature -LiteralPath $deviceSetup }
+if (-not $UnsignedForMsiSigning) {
+    if ($null -eq $deviceSetupSignature.SignerCertificate) {
+        throw 'Root-device setup tool verification succeeded without an inspectable signer certificate.'
+    }
+    if ($deviceSetupSignature.Status -eq [System.Management.Automation.SignatureStatus]::HashMismatch) {
+        throw 'Root-device setup tool inspection reported a hash mismatch.'
+    }
 }
 if ($usesLocalTestCertificate -and $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()) {
     throw 'The package public certificate does not match the root-device setup tool signer.'
 }
 
-$signingChannel = 'external-catalog-signing'
+$signingChannel = if ($UnsignedForMsiSigning) { 'msi-request-signing' } else { 'external-catalog-signing' }
 if ($usesLocalTestCertificate) {
     $catalogThumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
     $certificateThumbprint = $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
@@ -156,19 +174,35 @@ $manifest = [ordered]@{
     driver_ver = $DriverVer
     platform = $Platform
     protocol_version = 1
-    signing = [ordered]@{
-        channel = $signingChannel
-        signer_subject = $catalogSignature.SignerCertificate.Subject
-        signer_thumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
-        device_setup_signer_subject = $deviceSetupSignature.SignerCertificate.Subject
-        device_setup_signer_thumbprint = $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+    signing = if ($UnsignedForMsiSigning) {
+        # No signer exists yet. Naming the files that will be signed keeps the
+        # manifest self-describing, so a consumer does not have to infer which
+        # hashes above are expected to go stale.
+        [ordered]@{
+            channel = $signingChannel
+            signed_downstream = @(
+                'driver/VibeshineVhfGamepad.cat',
+                'tools/VibeshineVhfGamepadDeviceSetup.exe'
+            )
+        }
+    } else {
+        [ordered]@{
+            channel = $signingChannel
+            signer_subject = $catalogSignature.SignerCertificate.Subject
+            signer_thumbprint = $catalogSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+            device_setup_signer_subject = $deviceSetupSignature.SignerCertificate.Subject
+            device_setup_signer_thumbprint = $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
+        }
     }
     files = $files
 }
 $manifestPath = Join-Path $PackageDir 'manifest.json'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -NoNewline -Encoding utf8
 
-if ($usesLocalTestCertificate) {
+if ($UnsignedForMsiSigning) {
+    Write-Output "Wrote an unsigned manifest for $PackageDir"
+    Write-Output 'The consuming installer must sign driver/VibeshineVhfGamepad.cat and tools/VibeshineVhfGamepadDeviceSetup.exe in its own signing request.'
+} elseif ($usesLocalTestCertificate) {
     Write-Output "Verified local signer identity for $PackageDir"
 } else {
     Write-Output "Verified signed catalog and final payload binding for $PackageDir"
