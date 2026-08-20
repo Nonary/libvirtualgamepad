@@ -125,3 +125,25 @@ A host that only ever calls `HidD_SetOutputReport` therefore gets no rumble and
 no light bar, silently. Nothing in this repository can change that; it would
 take a VHF callback that does not exist. Worth knowing before chasing a
 "rumble does not work" report that turns out to be the host's choice of API.
+
+## Deliberately not implemented
+
+Recorded so these are not repeatedly rediscovered as gaps.
+
+**PID Custom Force Data and Download Force Sample.** These upload arbitrary
+force waveforms rather than a parameterised effect. The engine here reduces
+every effect to an amplitude on one of two rumble motors, so a custom waveform
+would be flattened to a single amplitude anyway - losing the one thing that made
+it custom. The effects that do map onto a motor (constant, ramp, periodic, and
+the conditions, which are accepted and silent) are implemented. Titles using the
+sample-upload reports are rare, and the profile they would apply to is a
+fallback DirectInput does not accept as force-feedback capable in the first
+place.
+
+**Xbox 360.** Not possible, as above: it needs a bus child that VHF cannot
+create.
+
+**Dual touchpad (`LI_CCAP_DUAL_TOUCHPAD`).** Blocked upstream rather than here.
+Sunshine has no touchpad-index plumbing at any layer, so there is nothing for a
+second touchpad to be wired to. The DualSense and DualShock 4 profiles already
+report two contacts on their single touchpad, which is what real hardware does.
