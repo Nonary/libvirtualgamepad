@@ -101,6 +101,7 @@
     <ClCompile Include="src\profile.cpp" />
     <ClCompile Include="src\report_pump.cpp" />
     <ClCompile Include="src\switch_pro.cpp" />
+    <ClCompile Include="src\xbox_one.cpp" />
     <ClCompile Include="src\xbox_series.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -111,6 +112,7 @@
     <ClInclude Include="src\profile.h" />
     <ClInclude Include="src\report_pump.h" />
     <ClInclude Include="src\switch_pro.h" />
+    <ClInclude Include="src\xbox_one.h" />
     <ClInclude Include="src\xbox_series.h" />
     <None Include="VibeshineVhfGamepad.inf.in" />
   </ItemGroup>

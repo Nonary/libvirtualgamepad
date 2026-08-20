@@ -59,9 +59,39 @@ does not.
 bus, `xusb22.sys` binds to a bus child, and VHF cannot create one, so no
 descriptor makes that profile honest.
 
-`xbox_one` is reachable by the same route as `xbox_series` and stays
-unavailable only until its own report shape and feature behavior are
-implemented and tested.
+`xbox_one` is implemented and reaches XInput the same way. It matches
+`xinputhid.inf` on its own product ID (`PID_02EA`), where `xbox_series` has to
+fall through to the generic GIP software ID because `PID_0B12` is not in the
+INF's list at all.
+
+Its report is the Series report without the Share button, which is the only
+difference between the two pads that HID can see. Rather than keep two copies
+of a descriptor in step by hand, the Xbox One descriptor is the Series one with
+the Consumer Record block removed, and a test performs that removal and
+compares. An edit to one that is not mirrored in the other fails the test
+instead of shipping two pads that disagree about their own stick range. The
+encoder does the same thing: it builds a Series report and keeps the prefix.
+
+## What DirectInput does with the generic profiles
+
+Measured on the generic PID profile, since these are claims worth checking
+rather than assuming:
+
+- DirectInput **does not** enumerate it under `DIEDFL_FORCEFEEDBACK`, and
+  `DIDC_FORCEFEEDBACK` is clear. Publishing the PID report set is evidently not
+  sufficient for DirectInput to accept a device as force-feedback capable.
+- It appears **twice** in a plain controller enumeration, because the PID report
+  set forms a second top-level collection.
+- A resting trigger reads at the centre of DirectInput's range rather than the
+  bottom, and travels only across the upper half. The HID declaration is a
+  correct unsigned 0..255, so this is DirectInput's own axis handling.
+
+The force-feedback result is the important one: force feedback under
+DirectInput is the only reason this profile exists over `generic_hid`. Until
+that is understood, `generic_pid` stays a fallback that the automatic ladder
+reaches only when no console profile is offered, and it is deliberately not
+offered as a user-selectable option. Advertising a force-feedback pad that
+DirectInput refuses to treat as one would be worse than not offering it.
 
 ## PlayStation and Switch profiles
 

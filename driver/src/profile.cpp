@@ -7,6 +7,7 @@
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "switch_pro.h"
+#include "xbox_one.h"
 #include "xbox_series.h"
 
 #include <cstring>
@@ -114,6 +115,25 @@ constexpr profile_definition k_generic_profile {
     value.version_number = k_xbox_series_version;
     value.force_feedback = false;
     value.hardware_ids = xbox_series_hardware_ids(&value.hardware_ids_bytes);
+    return value;
+  }();
+  return definition;
+}
+
+// Xbox One. Reaches XInput the same way the Series pad does, and in fact
+// matches xinputhid.inf on its own product ID rather than through the generic
+// GIP entry. Offered alongside Series because a handful of titles and anti-cheat
+// layers recognise controller generations by product ID.
+[[nodiscard]] const profile_definition &xbox_one_profile() noexcept {
+  static const profile_definition definition = [] {
+    profile_definition value {};
+    value.id = profile::xbox_one;
+    value.report_descriptor = xbox_one_descriptor(&value.report_descriptor_size);
+    value.vendor_id = k_xbox_vendor_id;
+    value.product_id = k_xbox_one_product_id;
+    value.version_number = k_xbox_one_version;
+    value.force_feedback = false;
+    value.hardware_ids = xbox_one_hardware_ids(&value.hardware_ids_bytes);
     return value;
   }();
   return definition;
@@ -236,13 +256,13 @@ const profile_definition *find_profile(const profile id) noexcept {
       return &xbox_series_profile();
     // A real Xbox 360 pad is an XUSB device on a USB bus. That needs a bus
     // child, which VHF cannot create, so no descriptor makes this profile
-    // honest. Xbox One is left unavailable until its own report shape and
-    // feature behavior are implemented and tested. Both return nullptr
-    // explicitly: grouping them with a neighbouring case would hand the caller
-    // a different vendor's controller under an Xbox name.
+    // honest. It returns nullptr explicitly: grouping it with a neighbouring
+    // case would hand the caller a different vendor's controller under an Xbox
+    // name.
     case profile::xbox_360:
-    case profile::xbox_one:
       return nullptr;
+    case profile::xbox_one:
+      return &xbox_one_profile();
     case profile::dualshock_4:
       return &dualshock4_profile();
     case profile::dualsense:

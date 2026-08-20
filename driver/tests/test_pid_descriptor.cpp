@@ -18,10 +18,12 @@
 #include "profile.h"
 #include "report_pump.h"
 #include "switch_pro.h"
+#include "xbox_one.h"
 #include "xbox_series.h"
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -872,7 +874,7 @@ int main() {
       {profile::dualshock_4, true, "dualshock_4"},
       {profile::dualsense, true, "dualsense"},
       {profile::xbox_360, false, "xbox_360"},
-      {profile::xbox_one, false, "xbox_one"},
+      {profile::xbox_one, true, "xbox_one"},
       {profile::switch_pro, true, "switch_pro"},
     };
 
@@ -1367,6 +1369,101 @@ int main() {
     check(quiet_fb.low_frequency == 0 && quiet_fb.high_frequency == 0,
           "rumble is ignored without its enable bit");
     check(quiet_fb.valid == 0, "nothing is marked valid");
+  }
+
+  {
+    // ---- Xbox One ----
+    std::size_t one_size = 0;
+    const std::uint8_t *const one = xbox_one_descriptor(&one_size);
+    const walk_result_t one_parsed = walk(one, one_size);
+    check(one_parsed.well_formed, "xbox one descriptor parses: " + one_parsed.error);
+    if (one_parsed.well_formed) {
+      check(one_parsed.collection_depth == 0, "xbox one collections balance");
+      check(one_parsed.top_level_collections == 1, "xbox one has one application collection");
+      std::printf("xbox one descriptor: %zu bytes, %zu items, %zu report ids\n",
+                  one_size, one_parsed.item_count, one_parsed.reports.size());
+
+      const auto input = one_parsed.reports.find(k_xbox_one_input_report_id);
+      if (input == one_parsed.reports.end()) {
+        check(false, "xbox one input report exists");
+      } else {
+        // One byte shorter than the Series report: no Share button.
+        check(input->second.input == 120,
+              "xbox one input report is 120 bits, got " + std::to_string(input->second.input));
+        check(input->second.input / 8 + 1 == sizeof(xbox_one_input_report),
+              "xbox one input report matches its struct");
+      }
+
+      // The rumble report is shared, so it must still be there and unchanged.
+      const auto output = one_parsed.reports.find(k_xbox_one_output_report_id);
+      if (output == one_parsed.reports.end()) {
+        check(false, "xbox one output report exists");
+      } else {
+        check(output->second.output == 64,
+              "xbox one output report is 64 bits, got " + std::to_string(output->second.output));
+      }
+    }
+
+    // The two descriptors are meant to differ by exactly the Share block.
+    // Deriving one from the other here means a later edit to the Series
+    // descriptor that is not mirrored fails this test instead of shipping two
+    // pads that disagree about their own stick range.
+    std::size_t series_size = 0;
+    const std::uint8_t *const series = xbox_series_descriptor(&series_size);
+    static const std::uint8_t share_block[] = {
+      0x05, 0x0C,        // Usage Page (Consumer)
+      0x0A, 0xB2, 0x00,  // Usage (Record)
+      0x15, 0x00,
+      0x25, 0x01,
+      0x95, 0x01,
+      0x75, 0x01,
+      0x81, 0x02,
+      0x15, 0x00,
+      0x25, 0x00,
+      0x75, 0x07,
+      0x95, 0x01,
+      0x81, 0x03,
+    };
+    const std::vector<std::uint8_t> series_bytes(series, series + series_size);
+    const auto found = std::search(series_bytes.begin(), series_bytes.end(),
+                                   std::begin(share_block), std::end(share_block));
+    check(found != series_bytes.end(), "the Share block is present in the Series descriptor");
+    if (found != series_bytes.end()) {
+      std::vector<std::uint8_t> derived(series_bytes.begin(), found);
+      derived.insert(derived.end(), found + sizeof(share_block), series_bytes.end());
+      const bool same = derived.size() == one_size &&
+                        std::equal(derived.begin(), derived.end(), one);
+      check(same, "the Xbox One descriptor is the Series one without the Share block");
+      if (!same) {
+        std::printf("  derived %zu bytes, xbox one is %zu\n", derived.size(), one_size);
+      }
+    }
+
+    // The shared prefix has to encode identically, or the two pads would report
+    // different sticks from the same input.
+    input_state_request sample {};
+    sample.left_x = 12000;
+    sample.left_y = -9000;
+    sample.right_x = -400;
+    sample.right_y = 25000;
+    sample.left_trigger = 200;
+    sample.right_trigger = 30;
+    sample.buttons = button_mask::south | button_mask::dpad_left | button_mask::start;
+
+    const xbox_series_input_report full = encode_xbox_series_input(sample);
+    const xbox_one_input_report short_report = encode_xbox_one_input(sample);
+    check(std::memcmp(&full, &short_report, sizeof(short_report)) == 0,
+          "the Xbox One report is the Series report without its last byte");
+
+    // Share is the one thing an Xbox One pad cannot report. Asking for it must
+    // not change anything else.
+    input_state_request with_share = sample;
+    with_share.buttons |= button_mask::misc;
+    const xbox_one_input_report unchanged = encode_xbox_one_input(with_share);
+    check(std::memcmp(&short_report, &unchanged, sizeof(unchanged)) == 0,
+          "an Xbox One pad silently has no Share button");
+    const xbox_series_input_report series_with_share = encode_xbox_series_input(with_share);
+    check(series_with_share.share == 1, "a Series pad still reports Share");
   }
 
   if (g_failures == 0) {

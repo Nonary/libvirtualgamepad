@@ -23,6 +23,7 @@
 #include "profile.h"
 #include "report_pump.h"
 #include "switch_pro.h"
+#include "xbox_one.h"
 #include "xbox_series.h"
 
 namespace {
@@ -122,6 +123,7 @@ EVT_WDF_TIMER evt_pid_tick;
 // Defined below with the PlayStation submit helpers; create_controller needs it
 // to decide whether to register the feature-report callbacks.
 [[nodiscard]] bool is_playstation(lvg::profile profile) noexcept;
+[[nodiscard]] bool is_xbox(lvg::profile profile) noexcept;
 
 // Base for each controller's container identity. The low byte is replaced with
 // the controller index so every slot is its own physical device to Windows.
@@ -545,6 +547,12 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   return profile == lvg::profile::dualshock_4 || profile == lvg::profile::dualsense;
 }
 
+// Both Xbox profiles take the same rumble report, so the output path treats
+// them alike. Only the input report differs, by the Share button.
+[[nodiscard]] bool is_xbox(const lvg::profile profile) noexcept {
+  return profile == lvg::profile::xbox_series || profile == lvg::profile::xbox_one;
+}
+
 // Rebuilds and submits a PlayStation input report from the accumulated state.
 // The caller owns the lifetime gate and must not hold state_lock.
 [[nodiscard]] NTSTATUS submit_playstation_report(
@@ -809,14 +817,24 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return switch_status;
   }
 
-  if (slot.selected_profile == lvg::profile::xbox_series) {
-    const lvg::driver::xbox_series_input_report xbox_report =
-      lvg::driver::encode_xbox_series_input(request);
+  if (is_xbox(slot.selected_profile)) {
+    // The two reports differ only in length, so the shorter one is built from
+    // the same encoder and both travel the same path.
+    lvg::driver::xbox_series_input_report xbox_report {};
+    ULONG xbox_length = 0;
+    if (slot.selected_profile == lvg::profile::xbox_one) {
+      const lvg::driver::xbox_one_input_report one = lvg::driver::encode_xbox_one_input(request);
+      std::memcpy(&xbox_report, &one, sizeof(one));
+      xbox_length = sizeof(one);
+    } else {
+      xbox_report = lvg::driver::encode_xbox_series_input(request);
+      xbox_length = sizeof(xbox_report);
+    }
     const auto xbox_kind =
       slot.pump.classify(request.buttons, request.left_trigger, request.right_trigger);
     unlock_context(context);
     const NTSTATUS xbox_status =
-      pump_report(context, slot, &xbox_report, sizeof(xbox_report),
+      pump_report(context, slot, &xbox_report, xbox_length,
                   lvg::driver::k_xbox_series_input_report_id, xbox_kind);
     unlock_lifetime(context);
     return xbox_status;
@@ -1114,7 +1132,7 @@ void evt_vhf_write_report(
   }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
-      slot->selected_profile == lvg::profile::xbox_series) {
+      is_xbox(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
     if (!context->stopping && slot->state == slot_state::active) {
@@ -1387,6 +1405,13 @@ void evt_vhf_get_input_report(
           std::memcpy(buffer, &report, sizeof(report));
           length = sizeof(report);
           report_id = k_xbox_series_input_report_id;
+          break;
+        }
+        case lvg::profile::xbox_one: {
+          const xbox_one_input_report report = encode_xbox_one_input(slot->last_input);
+          std::memcpy(buffer, &report, sizeof(report));
+          length = sizeof(report);
+          report_id = k_xbox_one_input_report_id;
           break;
         }
         default: {
