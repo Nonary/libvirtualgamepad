@@ -80,14 +80,17 @@ five paths above. Its `.sha256`, `.release-lock.json`, and `-evidence.json`
 records remain outside the ZIP so the archive never contains a circular hash
 of itself.
 
-The tag-only publish job requires repository immutable releases to be enabled
-and requires the tag to remain a lightweight reference to the exact workflow
-revision both before creating the draft and before publishing it. It uploads
-and verifies all four files while the release is a private draft, then publishes
-the release and requires GitHub to report that same release as immutable by
-both captured ID and tag. A failed post-publication verification preserves the
-published release for inspection; GitHub does not allow an immutable release's
-tag name to be reused.
+Before pushing a release tag, the operator must enable repository immutable
+releases and verify that prerequisite outside the workflow. The workflow uses
+only its scoped `GITHUB_TOKEN`; it does not add an administration token solely
+to read the repository setting. The tag-only publish job requires the tag to
+remain a lightweight reference to the exact workflow revision both before
+creating the draft and before publishing it. It uploads and verifies all four
+files while the release is a private draft, then publishes the release and
+requires GitHub to report that same release as immutable by both captured ID
+and tag. Once publication is attempted, any failure preserves the release for
+inspection because the API outcome may be ambiguous and GitHub does not allow
+an immutable release's tag name to be reused.
 
 Vibeshine and Vibepollo must download the same pinned producer asset and verify
 its checksum, release lock, manifest, exact layout, source revision, DriverVer,

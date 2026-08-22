@@ -19,15 +19,22 @@ For a clean tag matching `v0.1.0-beta.<positive-number>`, the producer:
    evidence sidecars. The checksum names and hashes the archive; the lock and
    evidence identify the tag and target, DriverVer, protocol, archive and
    manifest hashes, exact layout, signing channel, and files signed downstream.
-6. Requires repository immutable releases to be enabled and the tag to remain
-   a lightweight reference to the exact workflow revision before both draft
-   creation and publication. It uploads and verifies the four files in the
-   private draft, publishes the prerelease, and requires GitHub to report that
-   exact release as immutable by both captured ID and tag. A pre-publication
-   failure may delete only the captured mutable draft; a post-publication
-   failure preserves the release for inspection because its immutable tag name
-   cannot be reused. The producer does not sign, rebuild, or regenerate in the
-   publish job and requires no signing secret.
+6. Requires the tag to remain a lightweight reference to the exact workflow
+   revision before both draft creation and publication. It uploads and verifies
+   the four files in the private draft, publishes the prerelease, and requires
+   GitHub to report that exact release as immutable by both captured ID and tag.
+   A failure before any publication attempt may delete only the captured
+   mutable draft. Once publication is attempted, the release is preserved for
+   inspection because the API outcome may be ambiguous and its immutable tag
+   name cannot be reused. The producer does not sign, rebuild, or regenerate in
+   the publish job and requires no signing secret.
+
+Repository immutable releases are an operator-owned pre-tag prerequisite. The
+operator enables and verifies the setting before pushing a release tag. The
+workflow deliberately does not add a PAT or GitHub App secret for the
+Administration-read setting endpoint; its scoped `GITHUB_TOKEN` is used only
+for the release transaction, whose published responses must report
+`immutable: true`.
 
 The ZIP contains only:
 

@@ -373,19 +373,6 @@ function Assert-ReleaseObject {
     }
 }
 
-function Assert-RepositoryImmutableReleasesEnabled {
-    $response = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/immutable-releases"
-    if ([int] $response.StatusCode -ne 200) {
-        throw "Cannot prove repository immutable releases are enabled: GitHub returned HTTP $($response.StatusCode)."
-    }
-    $setting = Get-ResponseJson -Response $response -Operation 'Check repository immutable releases'
-    if ($setting.enabled -isnot [bool] -or
-        $setting.enforced_by_owner -isnot [bool] -or
-        $setting.enabled -ne $true) {
-        throw 'Repository immutable releases are disabled or GitHub returned an invalid setting response.'
-    }
-}
-
 function Assert-LightweightTagTarget {
     param(
         [Parameter(Mandatory = $true)][string] $ExpectedTag,
@@ -465,7 +452,7 @@ do {
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("libvirtualgamepad-publish-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 $createdDraftReleaseId = $null
-$publicationSucceeded = $false
+$publicationAttempted = $false
 $transactionComplete = $false
 $createPayload = [ordered]@{
     tag_name = $Tag
@@ -477,7 +464,6 @@ $createPayload = [ordered]@{
 }
 
 try {
-    Assert-RepositoryImmutableReleasesEnabled
     Assert-LightweightTagTarget -ExpectedTag $Tag -ExpectedRevision $SourceRevision
     $createResponse = Invoke-GitHubJson -Method Post -Uri "$script:ApiBase/releases" -Body $createPayload
     Assert-HttpStatus -Response $createResponse -ExpectedStatus 201 -Operation "Create draft release '$Tag'"
@@ -557,14 +543,13 @@ try {
         draft = [bool] $false
         prerelease = [bool] $true
     }
-    Assert-RepositoryImmutableReleasesEnabled
     Assert-LightweightTagTarget -ExpectedTag $Tag -ExpectedRevision $SourceRevision
+    $publicationAttempted = $true
     $publishResponse = Invoke-GitHubJson `
         -Method Patch `
         -Uri "$script:ApiBase/releases/$createdDraftReleaseId" `
         -Body $publishPayload
     Assert-HttpStatus -Response $publishResponse -ExpectedStatus 200 -Operation "Publish release $createdDraftReleaseId"
-    $publicationSucceeded = $true
     $published = Get-ResponseJson -Response $publishResponse -Operation "Publish release $createdDraftReleaseId"
     Assert-ReleaseObject `
         -Release $published `
@@ -622,8 +607,8 @@ try {
     $transactionComplete = $true
     Write-Output "Published release '$Tag' as ID $createdDraftReleaseId with four verified immutable assets."
 } finally {
-    if (-not $transactionComplete -and $null -ne $createdDraftReleaseId -and $publicationSucceeded) {
-        Write-Warning "Publication succeeded; preserving captured release ID $createdDraftReleaseId for inspection because an immutable release tag name cannot be reused."
+    if (-not $transactionComplete -and $null -ne $createdDraftReleaseId -and $publicationAttempted) {
+        Write-Warning "Publication was attempted; preserving captured release ID $createdDraftReleaseId because the outcome may be ambiguous and an immutable release tag name cannot be reused."
     } elseif (-not $transactionComplete -and $null -ne $createdDraftReleaseId) {
         try {
             $cleanupUri = "$script:ApiBase/releases/$createdDraftReleaseId"
