@@ -37,7 +37,8 @@ function Resolve-SdkTool {
     param(
         [Parameter(Mandatory = $true)]
         [string] $Name,
-        [string] $ExplicitPath
+        [string] $ExplicitPath,
+        [string[]] $AdditionalSearchRoots = @()
     )
 
     if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
@@ -47,7 +48,7 @@ function Resolve-SdkTool {
         return (Resolve-Path -LiteralPath $ExplicitPath).Path
     }
 
-    $sdkRoots = @(
+    $sdkRoots = @($AdditionalSearchRoots) + @(
         'D:\Software\WinSDK\bin',
         (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\bin')
     )
@@ -198,7 +199,11 @@ $inf2Cat = Resolve-SdkTool -Name 'Inf2Cat.exe' -ExplicitPath $Inf2CatPath
 if ($SkipInfVerif) {
     Write-Warning 'Skipping InfVerif. Verify this INF on a host with the WDK InfVerif tool before producing a release package.'
 } else {
-    $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath
+    $wdkToolRoots = @(
+        'D:\Software\WinSDK\Tools',
+        (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\Tools')
+    )
+    $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath -AdditionalSearchRoots $wdkToolRoots
     & $infVerif '/w' '/v' $inf
     if ($LASTEXITCODE -ne 0) {
         throw "InfVerif failed with exit code $LASTEXITCODE."
