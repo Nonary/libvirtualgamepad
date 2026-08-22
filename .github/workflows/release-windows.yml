@@ -37,11 +37,53 @@ jobs:
             throw "Tag, checkout, and workflow SHA do not resolve to the same commit."
           }
 
+      - name: Resolve hosted MSBuild
+        id: msbuild
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            throw "The hosted runner has no vswhere.exe at '$vswhere'."
+          }
+          $vswhereVersion = (Get-Item -LiteralPath $vswhere).VersionInfo.FileVersion
+          $instanceJson = & $vswhere `
+            -latest `
+            -products '*' `
+            -requires Microsoft.Component.MSBuild `
+            -format json `
+            -utf8
+          if ($LASTEXITCODE -ne 0) {
+            throw "vswhere '$vswhere' version '$vswhereVersion' failed with exit code $LASTEXITCODE."
+          }
+          $instances = @($instanceJson | ConvertFrom-Json)
+          if ($instances.Count -ne 1) {
+            throw "vswhere '$vswhere' version '$vswhereVersion' returned $($instances.Count) usable MSBuild instances; expected exactly one. Raw result: $($instanceJson -join '')"
+          }
+          $instancePath = [string] $instances[0].installationPath
+          $checkedCandidates = @(
+            Join-Path $instancePath 'MSBuild/Current/Bin/MSBuild.exe'
+            Join-Path $instancePath 'MSBuild/17.0/Bin/MSBuild.exe'
+          )
+          $candidates = @($checkedCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Sort-Object -Unique)
+          if ($candidates.Count -ne 1) {
+            throw "Visual Studio '$instancePath' exposed $($candidates.Count) usable MSBuild paths; expected exactly one. Paths checked: $($checkedCandidates -join ', ')"
+          }
+          $msbuildPath = (Resolve-Path -LiteralPath $candidates[0]).Path
+          $msbuildVersion = (Get-Item -LiteralPath $msbuildPath).VersionInfo.FileVersion
+          if ([string]::IsNullOrWhiteSpace($msbuildVersion)) {
+            throw "MSBuild '$msbuildPath' has no inspectable file version."
+          }
+          Write-Output "vswhere: $vswhere ($vswhereVersion)"
+          Write-Output "MSBuild: $msbuildPath ($msbuildVersion)"
+          "path=$msbuildPath" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Build and verify the producer package
+        env:
+          MSBUILD_PATH: ${{ steps.msbuild.outputs.path }}
         run: |
           ./tools/build-release-package.ps1 `
             -Tag $env:GITHUB_REF_NAME `
-            -OutputDir ./artifacts/release
+            -OutputDir ./artifacts/release `
+            -MSBuildPath $env:MSBUILD_PATH
 
       - name: Upload the verified release set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -110,6 +152,16 @@ jobs:
             'driver/VibeshineVhfGamepad.cat',
             'tools/VibeshineVhfGamepadDeviceSetup.exe'
           )
+          $expectedUnsigned = @(
+            'driver/VibeshineVhfGamepad.cat',
+            'driver/VibeshineVhfGamepad.dll',
+            'tools/VibeshineVhfGamepadDeviceSetup.exe'
+          )
+          $expectedMembershipFiles = @(
+            'driver/VibeshineVhfGamepad.cat',
+            'driver/VibeshineVhfGamepad.dll',
+            'driver/VibeshineVhfGamepad.inf'
+          )
 
           foreach ($record in @($lock, $evidence)) {
             if ($record.schema_version -ne 1 -or
@@ -125,19 +177,27 @@ jobs:
                 $record.manifest.sha256 -notmatch '^[0-9a-f]{64}$' -or
                 $record.signing.channel -cne 'msi-request-signing' -or
                 (@($record.layout) -join "`n") -cne ($expectedLayout -join "`n") -or
-                (@($record.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n")) {
+                (@($record.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n") -or
+                (@($record.signing.unsigned_payloads) -join "`n") -cne ($expectedUnsigned -join "`n") -or
+                $record.signing.catalog_membership.basis -cne 'fresh-inf2cat' -or
+                $record.signing.catalog_membership.generator -cne 'Inf2Cat' -or
+                (@($record.signing.catalog_membership.files.PSObject.Properties.Name | Sort-Object) -join "`n") -cne ($expectedMembershipFiles -join "`n")) {
               throw 'A release lock or evidence record does not match the workflow release contract.'
             }
           }
           if ($lock.driver_ver -cne $evidence.driver_ver -or
               $lock.protocol_version -ne $evidence.protocol_version -or
-              $lock.manifest.sha256 -cne $evidence.manifest.sha256) {
+              $lock.manifest.sha256 -cne $evidence.manifest.sha256 -or
+              ($lock.signing.catalog_membership | ConvertTo-Json -Depth 4 -Compress) -cne
+                ($evidence.signing.catalog_membership | ConvertTo-Json -Depth 4 -Compress)) {
             throw 'The release lock and evidence record disagree.'
           }
           if (-not $evidence.verification.clean_tagged_head -or
               -not $evidence.verification.infverif_required -or
               -not $evidence.verification.inf2cat_required -or
+              -not $evidence.verification.fresh_inf2cat_evidence -or
               -not $evidence.verification.package_verified_unsigned_for_msi_signing -or
+              -not $evidence.verification.unsigned_authenticode_checked -or
               -not $evidence.verification.certificate_absent -or
               -not $evidence.verification.archive_created_once) {
             throw 'The evidence record does not attest every producer release gate.'
@@ -182,7 +242,10 @@ jobs:
               $manifest.protocol_version -ne $lock.protocol_version -or
               $manifest.platform -cne $lock.platform -or
               $manifest.signing.channel -cne 'msi-request-signing' -or
-              (@($manifest.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n")) {
+              (@($manifest.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n") -or
+              (@($manifest.signing.unsigned_payloads) -join "`n") -cne ($expectedUnsigned -join "`n") -or
+              ($manifest.signing.catalog_membership | ConvertTo-Json -Depth 4 -Compress) -cne
+                ($lock.signing.catalog_membership | ConvertTo-Json -Depth 4 -Compress)) {
             throw 'The archived manifest does not agree with the release lock.'
           }
 
@@ -224,6 +287,7 @@ jobs:
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true
+          overwrite_files: false
           body: |
             Unsigned Windows x64 producer package for downstream SignPath signing.
 

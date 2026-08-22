@@ -16,6 +16,7 @@ param(
 
     [string] $InfVerifPath,
     [string] $Inf2CatPath,
+    [string] $CatalogGenerationEvidencePath,
 
     # InfVerif ships with the WDK, not the SDK, so a host can carry every other
     # packaging tool without it. Skipping is explicit and loud because it drops
@@ -218,6 +219,33 @@ if ($LASTEXITCODE -ne 0) {
 $catalog = Join-Path $driverDir 'VibeshineVhfGamepad.cat'
 if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
     throw "Inf2Cat completed without the expected catalog: $catalog"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($CatalogGenerationEvidencePath)) {
+    if ($SigningMode -ne 'Release') {
+        throw '-CatalogGenerationEvidencePath is reserved for unsigned Release packages.'
+    }
+    $CatalogGenerationEvidencePath = [System.IO.Path]::GetFullPath($CatalogGenerationEvidencePath)
+    if (Test-Path -LiteralPath $CatalogGenerationEvidencePath) {
+        throw "Refusing to overwrite catalog generation evidence: $CatalogGenerationEvidencePath"
+    }
+    $evidenceParent = Split-Path -Parent $CatalogGenerationEvidencePath
+    if (-not (Test-Path -LiteralPath $evidenceParent -PathType Container)) {
+        throw "The catalog generation evidence directory does not exist: $evidenceParent"
+    }
+    $catalogGenerationEvidence = [ordered]@{
+        schema_version = 1
+        generator = 'Inf2Cat'
+        package_dir = $OutputDir
+        platform = $Platform
+        driver_ver = $DriverVer
+        files = [ordered]@{
+            'driver/VibeshineVhfGamepad.inf' = (Get-FileHash -LiteralPath $inf -Algorithm SHA256).Hash.ToLowerInvariant()
+            'driver/VibeshineVhfGamepad.dll' = (Get-FileHash -LiteralPath $stagedDll -Algorithm SHA256).Hash.ToLowerInvariant()
+            'driver/VibeshineVhfGamepad.cat' = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $catalogGenerationEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $CatalogGenerationEvidencePath -NoNewline -Encoding utf8
 }
 
 if ($SigningMode -eq 'Release') {

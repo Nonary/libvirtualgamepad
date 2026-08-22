@@ -18,6 +18,7 @@ param(
     [string] $InfVerifPath,
     [switch] $SkipInfVerif,
     [string] $Inf2CatPath,
+    [string] $CatalogGenerationEvidencePath,
     [string] $SignToolPath,
 
     [ValidatePattern('^[0-9a-fA-F ]{40,64}$')]
@@ -226,6 +227,9 @@ if ($SkipInfVerif) {
 }
 if (-not [string]::IsNullOrWhiteSpace($Inf2CatPath)) {
     $prepareParameters.Inf2CatPath = $Inf2CatPath
+}
+if (-not [string]::IsNullOrWhiteSpace($CatalogGenerationEvidencePath)) {
+    $prepareParameters.CatalogGenerationEvidencePath = $CatalogGenerationEvidencePath
 }
 if (-not [string]::IsNullOrWhiteSpace($SignToolPath)) {
     $prepareParameters.SignToolPath = $SignToolPath

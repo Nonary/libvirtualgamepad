@@ -13,7 +13,8 @@ For a clean tag matching `v0.1.0-beta.<positive-number>`, the producer:
 3. Runs mandatory `InfVerif` and `Inf2Cat` over the staging directory.
 4. Verifies the exact tagged revision, DriverVer, protocol, x64 platform,
    payload hashes, five-file layout, absence of certificates, and
-   `msi-request-signing` manifest channel.
+   `msi-request-signing` manifest channel. The CAT, DLL, and setup EXE must all
+   report Authenticode `NotSigned` with no signer.
 5. Creates the ZIP once, then writes its external SHA-256, release-lock, and
    evidence sidecars. The checksum names and hashes the archive; the lock and
    evidence identify the tag and target, DriverVer, protocol, archive and
@@ -33,6 +34,13 @@ manifest.json
 ```
 
 Sidecars stay outside the ZIP to avoid a circular archive hash.
+
+An unsigned catalog cannot use SignTool's signed-catalog membership check. The
+producer therefore requires evidence emitted immediately after mandatory
+successful `Inf2Cat` over the fresh package directory. It binds the exact INF,
+DLL, and CAT hashes and is recorded as the `fresh-inf2cat` membership basis in
+the manifest, release lock, and evidence. Signed consumer verification still
+uses SignTool to prove both the catalog signature and membership.
 
 ## Consumer signing
 

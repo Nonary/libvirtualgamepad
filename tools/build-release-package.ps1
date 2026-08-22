@@ -134,9 +134,15 @@ $signedDownstream = @(
     'driver/VibeshineVhfGamepad.cat',
     'tools/VibeshineVhfGamepadDeviceSetup.exe'
 )
+$unsignedPayloads = @(
+    'driver/VibeshineVhfGamepad.cat',
+    'driver/VibeshineVhfGamepad.dll',
+    'tools/VibeshineVhfGamepadDeviceSetup.exe'
+)
 
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("libvirtualgamepad-release-" + [guid]::NewGuid().ToString('N'))
 $packageDir = Join-Path $workRoot 'package'
+$catalogGenerationEvidencePath = Join-Path $workRoot 'catalog-generation.json'
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
 try {
@@ -146,6 +152,7 @@ try {
         DriverVer = $driverVer
         PackageDir = $packageDir
         SigningMode = 'Release'
+        CatalogGenerationEvidencePath = $catalogGenerationEvidencePath
     }
     foreach ($parameter in @('MSBuildPath', 'InfVerifPath', 'Inf2CatPath')) {
         $value = Get-Variable -Name $parameter -ValueOnly
@@ -162,6 +169,7 @@ try {
         DriverVer = $driverVer
         SourceRevision = $head
         ProtocolVersion = $protocolVersion
+        CatalogGenerationEvidencePath = $catalogGenerationEvidencePath
         UnsignedForMsiSigning = $true
     }
     if (-not [string]::IsNullOrWhiteSpace($SignToolPath)) {
@@ -186,6 +194,18 @@ try {
         throw 'manifest.json metadata does not match the tagged source and release contract.'
     }
     Assert-ExactList -Actual @($manifest.signing.signed_downstream) -Expected $signedDownstream -Name 'Manifest signed_downstream'
+    Assert-ExactList -Actual @($manifest.signing.unsigned_payloads) -Expected $unsignedPayloads -Name 'Manifest unsigned_payloads'
+    if ($manifest.signing.catalog_membership.basis -cne 'fresh-inf2cat' -or
+        $manifest.signing.catalog_membership.generator -cne 'Inf2Cat') {
+        throw 'manifest.json does not record fresh Inf2Cat catalog membership evidence.'
+    }
+    $expectedMembershipFiles = @(
+        'driver/VibeshineVhfGamepad.cat',
+        'driver/VibeshineVhfGamepad.dll',
+        'driver/VibeshineVhfGamepad.inf'
+    )
+    $membershipFileNames = @($manifest.signing.catalog_membership.files.PSObject.Properties.Name | Sort-Object)
+    Assert-ExactList -Actual $membershipFileNames -Expected $expectedMembershipFiles -Name 'Catalog membership file list'
 
     $manifestFiles = @($manifest.files | ForEach-Object { [string] $_.path } | Sort-Object)
     Assert-ExactList -Actual $manifestFiles -Expected $expectedManifestFiles -Name 'Manifest file list'
@@ -194,6 +214,12 @@ try {
         $actualHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -cne [string] $file.sha256) {
             throw "Manifest hash mismatch for '$($file.path)'."
+        }
+        if ([string] $file.path -cin $expectedMembershipFiles) {
+            $membershipHash = [string] $manifest.signing.catalog_membership.files.PSObject.Properties[[string] $file.path].Value
+            if ($membershipHash -cne $actualHash) {
+                throw "Catalog membership hash mismatch for '$($file.path)'."
+            }
         }
     }
 
@@ -259,6 +285,8 @@ try {
         signing = [ordered]@{
             channel = 'msi-request-signing'
             signed_downstream = $signedDownstream
+            unsigned_payloads = $unsignedPayloads
+            catalog_membership = $manifest.signing.catalog_membership
         }
     }
     $releaseMetadata | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDir $lockName) -NoNewline -Encoding utf8
@@ -271,7 +299,9 @@ try {
         clean_tagged_head = $true
         infverif_required = $true
         inf2cat_required = $true
+        fresh_inf2cat_evidence = $true
         package_verified_unsigned_for_msi_signing = $true
+        unsigned_authenticode_checked = $true
         certificate_absent = $true
         archive_created_once = $true
     }

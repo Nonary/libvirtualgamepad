@@ -91,6 +91,13 @@ hashes are expected to change, while the INF and DLL hashes remain immutable.
 The consumer records its own local release lock after verification and signing;
 that consumer lock is not inserted into the producer archive.
 
+The producer's unsigned verification requires evidence written immediately
+after successful `Inf2Cat` over the fresh package directory. That evidence binds
+the exact INF, DLL, and CAT hashes; it is the unsigned catalog-membership basis,
+because SignTool's catalog membership verification requires a signed catalog.
+The catalog, driver DLL, and setup tool must each report Authenticode
+`NotSigned` with no signer before the archive can be created.
+
 `tools/prepare-driver-package.ps1` creates an unsigned staging directory and
 refuses to overwrite an existing one. `tools/verify-driver-package.ps1`
 verifies signed packages when signatures exist, or records the explicit

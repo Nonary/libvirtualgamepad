@@ -18,6 +18,8 @@ param(
     [ValidateRange(1, 65535)]
     [uint16] $ProtocolVersion,
 
+    [string] $CatalogGenerationEvidencePath,
+
     [string] $SignToolPath,
 
     [switch] $AllowLocalTestCertificate,
@@ -27,15 +29,19 @@ param(
     # signing request. SignPath is authorised for Nonary/vibeshine and not for
     # this repository, so a release here cannot carry a production signature.
     #
-    # Everything except the signature checks still runs. The recorded hashes
-    # for the catalog and the root-device tool are pre-signature and will not
-    # match once those files are signed; the consumer knows to skip exactly
-    # those two and to require a valid signature on them instead.
+    # This mode requires fresh Inf2Cat generation evidence and proves that every
+    # signable producer payload is unsigned. An unsigned catalog cannot use
+    # SignTool's signed-catalog membership check; the evidence instead binds the
+    # exact INF, DLL, and CAT hashes generated together in the fresh package.
+    # The CAT and setup-tool hashes will change when the consumer signs them.
     [switch] $UnsignedForMsiSigning
 )
 
 if ($UnsignedForMsiSigning -and $AllowLocalTestCertificate) {
     throw 'A package signed downstream cannot also be a local-test package.'
+}
+if (-not $UnsignedForMsiSigning -and -not [string]::IsNullOrWhiteSpace($CatalogGenerationEvidencePath)) {
+    throw '-CatalogGenerationEvidencePath is valid only with -UnsignedForMsiSigning.'
 }
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +63,27 @@ function Resolve-SignTool {
     return $command.Source
 }
 
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-UnsignedAuthenticode {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+        $null -ne $signature.SignerCertificate) {
+        $signer = if ($null -eq $signature.SignerCertificate) {
+            '<none>'
+        } else {
+            $signature.SignerCertificate.Subject
+        }
+        throw "Unsigned release payload '$Path' has Authenticode status '$($signature.Status)' and signer '$signer'."
+    }
+}
+
 $PackageDir = [System.IO.Path]::GetFullPath($PackageDir)
 $driverDir = Join-Path $PackageDir 'driver'
 $inf = Join-Path $driverDir 'VibeshineVhfGamepad.inf'
@@ -74,6 +101,51 @@ foreach ($file in @($inf, $dll, $catalog, $deviceSetup)) {
 $infDriverVer = Select-String -LiteralPath $inf -Pattern '^DriverVer=(.+)$' | Select-Object -First 1
 if ($null -eq $infDriverVer -or $infDriverVer.Matches[0].Groups[1].Value.Trim() -ne $DriverVer) {
     throw "The staged INF DriverVer does not match -DriverVer '$DriverVer'."
+}
+
+$catalogMembership = $null
+if ($UnsignedForMsiSigning) {
+    if ([string]::IsNullOrWhiteSpace($CatalogGenerationEvidencePath)) {
+        throw '-UnsignedForMsiSigning requires -CatalogGenerationEvidencePath from the successful Inf2Cat invocation.'
+    }
+    $CatalogGenerationEvidencePath = [System.IO.Path]::GetFullPath($CatalogGenerationEvidencePath)
+    if (-not (Test-Path -LiteralPath $CatalogGenerationEvidencePath -PathType Leaf)) {
+        throw "Catalog generation evidence is missing: $CatalogGenerationEvidencePath"
+    }
+    $generationEvidence = Get-Content -LiteralPath $CatalogGenerationEvidencePath -Raw | ConvertFrom-Json
+    $evidencePackageDir = [System.IO.Path]::GetFullPath([string] $generationEvidence.package_dir)
+    if ($generationEvidence.schema_version -ne 1 -or
+        $generationEvidence.generator -cne 'Inf2Cat' -or
+        -not $evidencePackageDir.Equals($PackageDir, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $generationEvidence.platform -cne $Platform -or
+        $generationEvidence.driver_ver -cne $DriverVer) {
+        throw 'Catalog generation evidence does not match this package, platform, or DriverVer.'
+    }
+
+    $membershipFiles = [ordered]@{
+        'driver/VibeshineVhfGamepad.inf' = $inf
+        'driver/VibeshineVhfGamepad.dll' = $dll
+        'driver/VibeshineVhfGamepad.cat' = $catalog
+    }
+    $membershipHashes = [ordered]@{}
+    $evidenceFileNames = @($generationEvidence.files.PSObject.Properties.Name | Sort-Object)
+    $expectedMembershipNames = @($membershipFiles.Keys | Sort-Object)
+    if (($evidenceFileNames -join "`n") -cne ($expectedMembershipNames -join "`n")) {
+        throw 'Catalog generation evidence contains an unexpected file set.'
+    }
+    foreach ($entry in $membershipFiles.GetEnumerator()) {
+        $actualHash = Get-Sha256 -Path $entry.Value
+        $evidenceHash = [string] $generationEvidence.files.PSObject.Properties[$entry.Key].Value
+        if ($actualHash -cne $evidenceHash) {
+            throw "Catalog generation evidence hash mismatch for '$($entry.Key)'."
+        }
+        $membershipHashes[$entry.Key] = $actualHash
+    }
+    $catalogMembership = [ordered]@{
+        basis = 'fresh-inf2cat'
+        generator = 'Inf2Cat'
+        files = $membershipHashes
+    }
 }
 
 $signTool = $null
@@ -104,9 +176,10 @@ if (-not $PSBoundParameters.ContainsKey('ProtocolVersion')) {
     $ProtocolVersion = [uint16] $protocolMatch.Groups[1].Value
 }
 
-# A catalog is the release signature. Verify both the catalog itself and its
-# binding to the exact final INF and UMDF DLL. Do not re-sign this DLL after
-# the catalog has been created.
+# A signed catalog permits SignTool to verify both the signature and membership
+# of the exact final INF/DLL. The unsigned producer path cannot use that signed
+# membership check; it requires the fresh Inf2Cat hash binding above instead.
+# Do not re-sign the DLL after the catalog has been created.
 if (-not $usesLocalTestCertificate -and -not $UnsignedForMsiSigning) {
     & $signTool verify '/v' '/pa' $catalog
     if ($LASTEXITCODE -ne 0) {
@@ -152,6 +225,12 @@ if (-not $UnsignedForMsiSigning) {
 }
 if ($usesLocalTestCertificate -and $deviceSetupSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant() -ne $testCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()) {
     throw 'The package public certificate does not match the root-device setup tool signer.'
+}
+
+if ($UnsignedForMsiSigning) {
+    foreach ($unsignedPayload in @($catalog, $dll, $deviceSetup)) {
+        Assert-UnsignedAuthenticode -Path $unsignedPayload
+    }
 }
 
 $signingChannel = if ($UnsignedForMsiSigning) { 'msi-request-signing' } else { 'external-catalog-signing' }
@@ -203,6 +282,12 @@ $manifest = [ordered]@{
                 'driver/VibeshineVhfGamepad.cat',
                 'tools/VibeshineVhfGamepadDeviceSetup.exe'
             )
+            unsigned_payloads = @(
+                'driver/VibeshineVhfGamepad.cat',
+                'driver/VibeshineVhfGamepad.dll',
+                'tools/VibeshineVhfGamepadDeviceSetup.exe'
+            )
+            catalog_membership = $catalogMembership
         }
     } else {
         [ordered]@{
