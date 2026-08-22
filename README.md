@@ -72,18 +72,31 @@ tools/
 manifest.json
 ```
 
-The release order is final architecture-matched INF/DLL -> `Inf2Cat` ->
-SignPath-sign the generated catalog and the separately packaged setup tool ->
-verify catalog membership and both signatures -> write the final manifest ->
-publish. `tools/prepare-driver-package.ps1` creates an unsigned staging
-directory and refuses to overwrite an existing one.
-`tools/verify-driver-package.ps1` verifies the signed catalog against the final
-INF/DLL, then verifies the setup tool's embedded signature, and only then
-writes `manifest.json`. The tool is intentionally outside the catalog because
-it is not a driver payload. Vibeshine must consume a pinned signed package and
-must not rewrite either the catalog-bound DLL or the manifest-hashed setup tool
-inside its MSI. Local test packages use a clearly separate local test
-certificate.
+The producer builds this payload once. On an accepted release tag,
+`tools/build-release-package.ps1` requires a clean tagged HEAD, orchestrates the
+existing build, staging, `InfVerif`, `Inf2Cat`, and verification scripts, and
+publishes an immutable unsigned-for-consumer-signing archive. The ZIP contains
+only the five paths above. Its `.sha256`, `.release-lock.json`, and
+`-evidence.json` records remain outside the ZIP so the archive never contains a
+circular hash of itself.
+
+Vibeshine and Vibepollo must download the same pinned producer asset and verify
+its checksum, release lock, manifest, exact layout, source revision, DriverVer,
+protocol, platform, `msi-request-signing` channel, and payload hashes. Consumers
+must not compile or regenerate the driver, setup tool, INF, catalog, manifest,
+or ZIP. Their own MSI SignPath request signs exactly
+`driver/VibeshineVhfGamepad.cat` and
+`tools/VibeshineVhfGamepadDeviceSetup.exe`; those two pre-signature manifest
+hashes are expected to change, while the INF and DLL hashes remain immutable.
+The consumer records its own local release lock after verification and signing;
+that consumer lock is not inserted into the producer archive.
+
+`tools/prepare-driver-package.ps1` creates an unsigned staging directory and
+refuses to overwrite an existing one. `tools/verify-driver-package.ps1`
+verifies signed packages when signatures exist, or records the explicit
+downstream-signing contract when called with `-UnsignedForMsiSigning`. The setup
+tool is intentionally outside the catalog because it is not a driver payload.
+Local test packages use a clearly separate local test certificate.
 
 For a local test build, `tools/build-driver.ps1` follows the same package model
 as Vibeshine's virtual-display driver: it builds the UMDF DLL and the owned
@@ -119,6 +132,17 @@ machine-wide setting. Use `tools/build-driver.ps1 -SigningMode Release` for a
 release staging package. That mode deliberately omits the `.cer` and leaves the
 final `.cat` and setup tool unsigned for their separate SignPath requests.
 Never publish the local-test certificate as part of a SignPath release archive.
+
+The public release workflow accepts only tags matching
+`v0.1.0-beta.<positive-number>`. For example, `v0.1.0-beta.1` produces these
+four release assets without signing them:
+
+```text
+libvirtualgamepad-0.1.0-beta.1-windows-x64.zip
+libvirtualgamepad-0.1.0-beta.1-windows-x64.zip.sha256
+libvirtualgamepad-0.1.0-beta.1-windows-x64.release-lock.json
+libvirtualgamepad-0.1.0-beta.1-windows-x64-evidence.json
+```
 
 The setup tool creates or removes only `ROOT\VIBESHINEVIRTUALGAMEPAD`; it does
 not enumerate physical HID devices or manage third-party virtual-controller

@@ -1,0 +1,235 @@
+name: Release Windows package
+
+on:
+  push:
+    tags:
+      - 'v0.1.0-beta.*'
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the tag checkout
+        run: |
+          if ($env:GITHUB_REF_TYPE -cne 'tag' -or
+              $env:GITHUB_REF_NAME -notmatch '^v0\.1\.0-beta\.[1-9][0-9]*$') {
+            throw "Unsupported release ref '$env:GITHUB_REF'."
+          }
+          $head = (git rev-parse HEAD).Trim()
+          $target = (git rev-parse "refs/tags/$env:GITHUB_REF_NAME`^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $target -or $head -cne $env:GITHUB_SHA) {
+            throw "Tag, checkout, and workflow SHA do not resolve to the same commit."
+          }
+
+      - name: Build and verify the producer package
+        run: |
+          ./tools/build-release-package.ps1 `
+            -Tag $env:GITHUB_REF_NAME `
+            -OutputDir ./artifacts/release
+
+      - name: Upload the verified release set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-release-${{ github.ref_name }}
+          path: artifacts/release/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - name: Download the verified release set
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: windows-release-${{ github.ref_name }}
+          path: release
+
+      - name: Revalidate immutable release inputs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($env:GITHUB_REF_TYPE -cne 'tag' -or
+              $tag -notmatch '^v0\.1\.0-beta\.[1-9][0-9]*$') {
+            throw "Unsupported release ref '$env:GITHUB_REF'."
+          }
+
+          $version = $tag.Substring(1)
+          $assetBase = "libvirtualgamepad-$version-windows-x64"
+          $archiveName = "$assetBase.zip"
+          $checksumName = "$archiveName.sha256"
+          $lockName = "$assetBase.release-lock.json"
+          $evidenceName = "$assetBase-evidence.json"
+          $expectedFiles = @($archiveName, $checksumName, $lockName, $evidenceName) | Sort-Object
+          $actualFiles = @(Get-ChildItem -LiteralPath release -File | ForEach-Object Name | Sort-Object)
+          if (($expectedFiles -join "`n") -cne ($actualFiles -join "`n")) {
+            throw "Downloaded artifact set is not exact. Expected $($expectedFiles -join ', '); got $($actualFiles -join ', ')."
+          }
+
+          $archivePath = Join-Path release $archiveName
+          $checksumText = Get-Content -LiteralPath (Join-Path release $checksumName) -Raw
+          $checksumPattern = '^([0-9a-f]{64})  ' + [regex]::Escape($archiveName) + '\r?\n?$'
+          if ($checksumText -cnotmatch $checksumPattern) {
+            throw 'The SHA-256 sidecar is malformed or names a different archive.'
+          }
+          $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveHash -cne $Matches[1]) {
+            throw 'The archive SHA-256 does not match its sidecar.'
+          }
+
+          $lock = Get-Content -LiteralPath (Join-Path release $lockName) -Raw | ConvertFrom-Json
+          $evidence = Get-Content -LiteralPath (Join-Path release $evidenceName) -Raw | ConvertFrom-Json
+          $expectedLayout = @(
+            'driver/VibeshineVhfGamepad.cat',
+            'driver/VibeshineVhfGamepad.dll',
+            'driver/VibeshineVhfGamepad.inf',
+            'manifest.json',
+            'tools/VibeshineVhfGamepadDeviceSetup.exe'
+          )
+          $expectedSigned = @(
+            'driver/VibeshineVhfGamepad.cat',
+            'tools/VibeshineVhfGamepadDeviceSetup.exe'
+          )
+
+          foreach ($record in @($lock, $evidence)) {
+            if ($record.schema_version -ne 1 -or
+                $record.tag -cne $tag -or
+                $record.tag_target -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+                $record.source_revision -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+                $record.driver_ver -notmatch '^\d{2}/\d{2}/\d{4},0\.1\.0\.\d+$' -or
+                $record.protocol_version -lt 1 -or
+                $record.platform -cne 'x64' -or
+                $record.archive.name -cne $archiveName -or
+                $record.archive.sha256 -cne $archiveHash -or
+                $record.manifest.path -cne 'manifest.json' -or
+                $record.manifest.sha256 -notmatch '^[0-9a-f]{64}$' -or
+                $record.signing.channel -cne 'msi-request-signing' -or
+                (@($record.layout) -join "`n") -cne ($expectedLayout -join "`n") -or
+                (@($record.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n")) {
+              throw 'A release lock or evidence record does not match the workflow release contract.'
+            }
+          }
+          if ($lock.driver_ver -cne $evidence.driver_ver -or
+              $lock.protocol_version -ne $evidence.protocol_version -or
+              $lock.manifest.sha256 -cne $evidence.manifest.sha256) {
+            throw 'The release lock and evidence record disagree.'
+          }
+          if (-not $evidence.verification.clean_tagged_head -or
+              -not $evidence.verification.infverif_required -or
+              -not $evidence.verification.inf2cat_required -or
+              -not $evidence.verification.package_verified_unsigned_for_msi_signing -or
+              -not $evidence.verification.certificate_absent -or
+              -not $evidence.verification.archive_created_once) {
+            throw 'The evidence record does not attest every producer release gate.'
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $archivePath).Path)
+          try {
+            $zipLayout = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } | Sort-Object)
+            if (($zipLayout -join "`n") -cne ($expectedLayout -join "`n")) {
+              throw 'The ZIP layout does not match the release lock.'
+            }
+            $manifestEntry = $zip.GetEntry('manifest.json')
+            if ($null -eq $manifestEntry) {
+              throw 'The ZIP has no manifest.json entry.'
+            }
+            $stream = $manifestEntry.Open()
+            $memory = [System.IO.MemoryStream]::new()
+            try {
+              $stream.CopyTo($memory)
+              $manifestBytes = $memory.ToArray()
+            } finally {
+              $memory.Dispose()
+              $stream.Dispose()
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $manifestHash = ([System.BitConverter]::ToString($sha256.ComputeHash($manifestBytes))).Replace('-', '').ToLowerInvariant()
+          } finally {
+            $sha256.Dispose()
+          }
+          if ($manifestHash -cne $lock.manifest.sha256) {
+            throw 'The archived manifest hash does not match the release lock.'
+          }
+          $manifest = [System.Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+          if ($manifest.source_revision -cne $lock.source_revision -or
+              $manifest.driver_ver -cne $lock.driver_ver -or
+              $manifest.protocol_version -ne $lock.protocol_version -or
+              $manifest.platform -cne $lock.platform -or
+              $manifest.signing.channel -cne 'msi-request-signing' -or
+              (@($manifest.signing.signed_downstream) -join "`n") -cne ($expectedSigned -join "`n")) {
+            throw 'The archived manifest does not agree with the release lock.'
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $tagUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $tagResponse = Invoke-WebRequest -Uri $tagUri -Headers $headers -SkipHttpErrorCheck
+          if ($tagResponse.StatusCode -eq 200) {
+            throw "A GitHub release already exists for '$tag'."
+          }
+          if ($tagResponse.StatusCode -ne 404) {
+            throw "GitHub release lookup failed with HTTP $($tagResponse.StatusCode)."
+          }
+
+          $page = 1
+          do {
+            $listUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100&page=$page"
+            $listResponse = Invoke-WebRequest -Uri $listUri -Headers $headers -SkipHttpErrorCheck
+            if ($listResponse.StatusCode -ne 200) {
+              throw "GitHub asset lookup failed with HTTP $($listResponse.StatusCode)."
+            }
+            $releases = @($listResponse.Content | ConvertFrom-Json)
+            $existingAssets = @($releases | ForEach-Object { $_.assets } | ForEach-Object { $_.name })
+            $duplicates = @($expectedFiles | Where-Object { $_ -cin $existingAssets })
+            if ($duplicates.Count -ne 0) {
+              throw "A release asset already exists with a protected name: $($duplicates -join ', ')."
+            }
+            ++$page
+          } while ($releases.Count -eq 100)
+
+      - name: Publish the prerelease from verified files
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            Unsigned Windows x64 producer package for downstream SignPath signing.
+
+            Consumers must verify the SHA-256 and release lock, then sign only the catalog and setup tool in their MSI signing request.
+          files: |
+            release/*.zip
+            release/*.zip.sha256
+            release/*.release-lock.json
+            release/*-evidence.json

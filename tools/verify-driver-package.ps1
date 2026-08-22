@@ -15,6 +15,9 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{40,64}$')]
     [string] $SourceRevision,
 
+    [ValidateRange(1, 65535)]
+    [uint16] $ProtocolVersion,
+
     [string] $SignToolPath,
 
     [switch] $AllowLocalTestCertificate,
@@ -73,7 +76,10 @@ if ($null -eq $infDriverVer -or $infDriverVer.Matches[0].Groups[1].Value.Trim() 
     throw "The staged INF DriverVer does not match -DriverVer '$DriverVer'."
 }
 
-$signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+$signTool = $null
+if (-not $UnsignedForMsiSigning) {
+    $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+}
 $testCertificate = $null
 if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
     if (-not $AllowLocalTestCertificate) {
@@ -84,6 +90,19 @@ if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
     throw '-AllowLocalTestCertificate requires driver/VibeshineVhfGamepad.cer.'
 }
 $usesLocalTestCertificate = $null -ne $testCertificate
+
+if (-not $PSBoundParameters.ContainsKey('ProtocolVersion')) {
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $protocolHeader = Join-Path $repoRoot 'include/libvirtualgamepad/protocol.h'
+    $protocolMatch = [regex]::Match(
+        (Get-Content -LiteralPath $protocolHeader -Raw),
+        'k_protocol_version\s*=\s*(\d+)'
+    )
+    if (-not $protocolMatch.Success) {
+        throw "Could not derive the protocol version from '$protocolHeader'. Pass -ProtocolVersion explicitly."
+    }
+    $ProtocolVersion = [uint16] $protocolMatch.Groups[1].Value
+}
 
 # A catalog is the release signature. Verify both the catalog itself and its
 # binding to the exact final INF and UMDF DLL. Do not re-sign this DLL after
@@ -173,7 +192,7 @@ $manifest = [ordered]@{
     source_revision = $SourceRevision.ToLowerInvariant()
     driver_ver = $DriverVer
     platform = $Platform
-    protocol_version = 1
+    protocol_version = $ProtocolVersion
     signing = if ($UnsignedForMsiSigning) {
         # No signer exists yet. Naming the files that will be signed keeps the
         # manifest self-describing, so a consumer does not have to infer which

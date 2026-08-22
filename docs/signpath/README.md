@@ -1,27 +1,69 @@
-# SignPath contract
+# Producer and SignPath contract
 
-Production signing has two independent artifacts:
+The libvirtualgamepad producer owns one build of the unsigned Windows x64
+payload. Vibeshine and Vibepollo consume that same immutable pinned archive;
+neither consumer compiles or regenerates any driver/package input.
 
-1. Build one architecture's UMDF DLL.
-2. Stage that DLL with the matching generated INF.
-3. Run `InfVerif` and `Inf2Cat` over the staging directory.
-4. Submit `VibeshineVhfGamepad.cat` with
+## Producer release
+
+For a clean tag matching `v0.1.0-beta.<positive-number>`, the producer:
+
+1. Builds the x64 Release UMDF DLL and root-device setup tool.
+2. Stages the DLL with its matching generated INF.
+3. Runs mandatory `InfVerif` and `Inf2Cat` over the staging directory.
+4. Verifies the exact tagged revision, DriverVer, protocol, x64 platform,
+   payload hashes, five-file layout, absence of certificates, and
+   `msi-request-signing` manifest channel.
+5. Creates the ZIP once, then writes its external SHA-256, release-lock, and
+   evidence sidecars. The checksum names and hashes the archive; the lock and
+   evidence identify the tag and target, DriverVer, protocol, archive and
+   manifest hashes, exact layout, signing channel, and files signed downstream.
+6. Publishes the four files as a prerelease from the existing tag. The producer
+   does not sign, rebuild, or regenerate in the publish job and requires no
+   signing secret.
+
+The ZIP contains only:
+
+```text
+driver/VibeshineVhfGamepad.inf
+driver/VibeshineVhfGamepad.dll
+driver/VibeshineVhfGamepad.cat
+tools/VibeshineVhfGamepadDeviceSetup.exe
+manifest.json
+```
+
+Sidecars stay outside the ZIP to avoid a circular archive hash.
+
+## Consumer signing
+
+Each Vibeshine or Vibepollo MSI pipeline downloads the same pinned producer
+asset and validates the archive checksum, producer release lock, manifest hash,
+source revision, DriverVer, protocol, platform, exact layout, payload hashes,
+signing channel, and downstream file list before extraction into its packaging
+staging area. A consumer adds its own local release lock; it does not modify the
+producer ZIP or rebuild any producer file.
+
+The consumer's MSI SignPath request has two independent artifacts:
+
+1. Sign `VibeshineVhfGamepad.cat` with
    `vhf-gamepad-catalog.artifact-config.xml`.
-5. Submit `VibeshineVhfGamepadDeviceSetup.exe` with
+2. Sign `VibeshineVhfGamepadDeviceSetup.exe` with
    `vhf-gamepad-device-setup.artifact-config.xml`.
-6. Restore both signed artifacts, verify the catalog against the final INF and
-   DLL and verify the setup tool's embedded signature, then publish the
-   architecture-specific archive and its manifest.
+3. Restore those two signed files, verify the catalog signature and its binding
+   to the unchanged INF/DLL, and verify the setup tool's embedded signature.
+
+The producer manifest intentionally hashes the unsigned catalog and setup tool.
+Those two hashes become stale after the authorized downstream signing step; no
+other producer payload hash may change.
 
 Do not add the driver DLL to a generic MSI deep-signing request. Re-signing the
 DLL after `Inf2Cat` changes its catalog hash. If a future UMDF load test proves
-that the DLL must be embedded-signed, do that before step 3 and use a separate
-reviewed SignPath contract for it.
+that the DLL must be embedded-signed, do that before `Inf2Cat` and use a
+separate reviewed SignPath contract for it.
 
-The setup tool is not catalog-bound, so it must be Authenticode-signed as a PE.
-Do not re-sign it in a downstream MSI: the release manifest hashes the setup
-tool as well as the catalog-bound DLL, so either rewrite would invalidate the
-immutable package contract.
+The setup tool is not catalog-bound, so it must be Authenticode-signed as a PE
+in the consuming MSI's request. Do not sign or rewrite it again after that
+request.
 
 ## Local test packages
 
@@ -34,7 +76,7 @@ certificate in the test host's `LocalMachine\Root` and
 `LocalMachine\TrustedPublisher` stores. This establishes certificate trust; it
 does not change Windows test-signing policy.
 
-Release automation must use `-SigningMode Release`, which produces no `.cer`
-and leaves the catalog and setup tool for their separate SignPath requests. A
-local certificate, its private key, and any package produced in `LocalTest`
-mode are never release inputs.
+Release automation uses `-SigningMode Release`, which produces no `.cer` and
+leaves the catalog and setup tool unsigned for their consumer-owned SignPath
+request. A local certificate, its private key, and any package produced in
+`LocalTest` mode are never release inputs.
