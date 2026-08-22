@@ -37,6 +37,9 @@ jobs:
             throw "Tag, checkout, and workflow SHA do not resolve to the same commit."
           }
 
+      - name: Validate case-sensitive release layout
+        run: ./tools/tests/test-release-package-case.ps1
+
       - name: Resolve hosted MSBuild
         id: msbuild
         run: |

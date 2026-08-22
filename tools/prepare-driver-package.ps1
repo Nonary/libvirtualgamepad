@@ -216,7 +216,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inf2Cat failed with exit code $LASTEXITCODE."
 }
 
-$catalog = Join-Path $driverDir 'VibeshineVhfGamepad.cat'
+$catalog = & (Join-Path $PSScriptRoot 'normalize-driver-catalog.ps1') -DriverDir $driverDir
 if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
     throw "Inf2Cat completed without the expected catalog: $catalog"
 }
