@@ -1,23 +1,25 @@
 # pid.codes product ID request
 
-**Status:** not submitted. Submitting means opening a pull request against a
-third-party public repository under Chase's GitHub account, so it needs him.
+**Status:** not submitted. The protocol enum values remain reserved, but both
+generic profiles are unavailable until an allocation is accepted. Submitting
+means opening a pull request against a third-party public repository under
+Chase's GitHub account, so it needs him.
 
 ## Why this is not optional
 
-The generic profiles (`generic_hid`, `generic_pid`) present `1209:0001`.
-pid.codes designates that as the Test PID, and the wording is not advisory:
+pid.codes designates `1209:0001` as the Test PID, and the wording is not
+advisory:
 
 > This PID is reserved for use in private testing. Anyone may assign it to their
 > device while they're testing in-house, but it MUST NOT be used on any device
 > that will be redistributed, sold, or manufactured.
 
-The VHF driver has not shipped yet — this work is on `vhf_gamepad_large`, not
-promoted — so nothing is in violation today. It would be the moment a build
-carrying these profiles reaches users. Fix it before that, not after.
-
-pid.codes also asks that source referencing the test PID warn about it. The
-comment at `k_vibeshine_product_id` in `driver/src/profile.cpp` already does.
+The public driver has no production profile definition carrying that identity.
+`find_profile()` refuses `generic_hid` and `generic_pid`, so the advertised mask
+omits them and both normal and raw create requests fail. The protocol enum
+numbers and generic report encoders remain stable for a future accepted
+allocation. Source references in the DirectInput probes are explicitly private
+test only and must never become release inputs.
 
 The console profiles are a separate matter and are unaffected. They present the
 real vendor identities (`045E` Microsoft, `054C` Sony, `057E` Nintendo) because
@@ -86,19 +88,15 @@ demands an identity for.
 
 ## What to change once an ID is allocated
 
-`driver/src/profile.cpp`: `k_vibeshine_product_id`, replacing the `0x0001`
-placeholder, and drop the warning comment above it. Nothing else references it.
+Add reviewed generic profile definitions in `driver/src/profile.cpp` using the
+accepted VID/PID, then enable those definitions in `find_profile()`. Update the
+focused profile-mask and identity tests in the same change. Keep the protocol
+enum numeric values unchanged.
 
 ## If the request is declined
 
-The generic profiles are the only thing affected, and they are already
-unreachable: Sunshine offers no option that selects one, and the automatic
-ladder reaches them only when no console profile is offered. They exist as a
-version-skew fallback for a new host talking to an older driver.
-
-So the fallback position is simply to stop offering them, which removes the
-prohibited identifier along with them. That costs the fallback — a user whose
-driver is older than their host would get no controller instead of a plain one —
-which is worth something, but not worth shipping an identifier we were told not
-to ship. Do not respond by inventing a different unowned VID; that is squatting,
-and unlike the console profiles there is no technical necessity to justify it.
+The current safe fallback is already in force: keep both generic profiles
+unavailable. A host must choose one of the advertised console profiles or fail
+the request; it must not create a device with the private-test identity. Do not
+respond by inventing a different unowned VID; that is squatting, and unlike the
+console profiles there is no technical necessity to justify it.

@@ -72,6 +72,7 @@ BOOL CALLBACK enum_axes(const DIDEVICEOBJECTINSTANCEW *const obj, void *const ct
 }  // namespace
 
 int main(int argc, char **argv) {
+  std::printf("PRIVATE TEST ONLY: 1209:0001 is not valid for redistributed devices.\n");
   // Which profile to look at, so the same measurement can be taken of a
   // console-shaped pad for comparison.
   lvg::profile which = lvg::profile::generic_pid;

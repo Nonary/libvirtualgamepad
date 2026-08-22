@@ -13,9 +13,15 @@ rule is about behavior matching the claim. It is not a prohibition on using a
 family's identifiers when the identity is a necessary part of a complete,
 tested emulation.
 
-## Initial profile
+## Reserved generic profiles
 
-The initial driver implements only `generic_hid`:
+The protocol reserves `generic_hid` and `generic_pid` at their original numeric
+values, and retains their report encoders for private-test research. The public
+driver deliberately refuses both profiles until the project receives an
+accepted VID/PID allocation. They are absent from the advertised profile mask,
+and raw create requests fail at the same `find_profile()` gate.
+
+The retained generic HID encoding models:
 
 - a standard HID Game Pad collection;
 - 32 buttons, hat switch, four signed 16-bit axes, and two unsigned triggers;
@@ -23,7 +29,8 @@ The initial driver implements only `generic_hid`:
 - one virtual HID child per owned controller slot;
 - bounded, last-event-wins feedback polling to Vibeshine.
 
-It is a VHF and protocol proof, not an assertion of native XInput support.
+It is a VHF and protocol test seam, not an available release profile or an
+assertion of native XInput support.
 
 ## Adding a profile
 
@@ -72,10 +79,13 @@ compares. An edit to one that is not mirrored in the other fails the test
 instead of shipping two pads that disagree about their own stick range. The
 encoder does the same thing: it builds a Series report and keeps the prefix.
 
-## What DirectInput does with the generic profiles
+## What DirectInput did with the private-test generic profiles
 
-Measured on the generic PID profile, since these are claims worth checking
-rather than assuming:
+The repository's explicitly labelled private-test probes historically measured
+the generic PID profile with pid.codes' private-test `1209:0001` identity. That
+identity is not permitted on redistributed devices, and the public driver now
+refuses both generic profiles. The measurements remain useful context rather
+than release behavior:
 
 - DirectInput **does not** enumerate it under `DIEDFL_FORCEFEEDBACK`, and
   `DIDC_FORCEFEEDBACK` is clear. Publishing the PID report set is evidently not
@@ -87,10 +97,9 @@ rather than assuming:
   correct unsigned 0..255, so this is DirectInput's own axis handling.
 
 The force-feedback result is the important one: force feedback under
-DirectInput is the only reason this profile exists over `generic_hid`. Until
-that is understood, `generic_pid` stays a fallback that the automatic ladder
-reaches only when no console profile is offered, and it is deliberately not
-offered as a user-selectable option. Advertising a force-feedback pad that
+DirectInput is the only reason this reserved profile exists over `generic_hid`.
+It must clear that behavior gap and receive an accepted VID/PID allocation
+before it can become available. Advertising a force-feedback pad that
 DirectInput refuses to treat as one would be worse than not offering it.
 
 ## PlayStation and Switch profiles

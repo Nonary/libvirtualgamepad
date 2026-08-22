@@ -868,8 +868,8 @@ int main() {
     // handing a caller a different vendor's controller under the wrong name.
     struct expectation { profile id; bool implemented; const char *name; };
     const expectation expectations[] = {
-      {profile::generic_hid, true, "generic_hid"},
-      {profile::generic_pid, true, "generic_pid"},
+      {profile::generic_hid, false, "generic_hid"},
+      {profile::generic_pid, false, "generic_pid"},
       {profile::xbox_series, true, "xbox_series"},
       {profile::dualshock_4, true, "dualshock_4"},
       {profile::dualsense, true, "dualsense"},
@@ -886,11 +886,20 @@ int main() {
       if (found != nullptr) {
         check(found->id == e.id,
               std::string(e.name) + " returns its own definition, not another profile's");
+        check(found->vendor_id != 0x1209 || found->product_id != 0x0001,
+              std::string(e.name) + " does not advertise the pid.codes private-test identity");
         expected_mask |= profile_bit(e.id);
       }
     }
-    check(available_profiles() == expected_mask,
-          "the advertised mask matches what find_profile implements");
+    constexpr profile_mask_t k_public_profile_mask = 0x7Cu;
+    check(expected_mask == k_public_profile_mask,
+          "the implemented profiles produce the exact public mask 0x7C");
+    check(available_profiles() == k_public_profile_mask,
+          "the advertised profile mask is exactly 0x7C");
+    check((available_profiles() & profile_bit(profile::generic_hid)) == 0,
+          "generic_hid is absent from the advertised profile mask");
+    check((available_profiles() & profile_bit(profile::generic_pid)) == 0,
+          "generic_pid is absent from the advertised profile mask");
   }
 
   {

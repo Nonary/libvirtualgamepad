@@ -34,6 +34,8 @@ inline constexpr GUID k_device_interface_guid {
 inline constexpr wchar_t k_root_hardware_id[] = L"ROOT\\VIBESHINEVIRTUALGAMEPAD";
 
 enum class profile : std::uint16_t {
+  // Reserved for protocol compatibility. The public driver refuses this value
+  // until the project has an accepted VID/PID allocation.
   generic_hid = 1,
   xbox_360 = 2,
   xbox_one = 3,
@@ -41,9 +43,9 @@ enum class profile : std::uint16_t {
   dualshock_4 = 5,
   dualsense = 6,
   switch_pro = 7,
-  // A generic HID game pad that also publishes the DirectInput Physical
-  // Interface Device report set, so DirectInput applications see a
-  // force-feedback capable device instead of a rumble-less pad.
+  // Reserved for protocol compatibility. Its report encoder remains available
+  // for development, but the public driver refuses it pending an accepted
+  // VID/PID allocation.
   generic_pid = 8,
 };
 

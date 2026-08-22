@@ -3,7 +3,6 @@
 
 #include "profile.h"
 
-#include "pid_ff.h"
 #include "dualsense.h"
 #include "dualshock4.h"
 #include "switch_pro.h"
@@ -16,90 +15,6 @@
 namespace lvg::driver {
 namespace {
 
-// A conventional HID Game Pad collection. It is purposefully generic: no
-// vendor/product identifier, proprietary report layout, or branded device
-// behavior is implied by this descriptor.
-constexpr std::uint8_t k_generic_gamepad_descriptor[] = {
-  0x05, 0x01,        // Usage Page (Generic Desktop)
-  0x09, 0x05,        // Usage (Game Pad)
-  0xA1, 0x01,        // Collection (Application)
-  0x85, 0x01,        //   Report ID (1)
-  0x05, 0x09,        //   Usage Page (Button)
-  0x19, 0x01,        //   Usage Minimum (1)
-  0x29, 0x20,        //   Usage Maximum (32)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x01,        //   Logical Maximum (1)
-  0x75, 0x01,        //   Report Size (1)
-  0x95, 0x20,        //   Report Count (32)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x05, 0x01,        //   Usage Page (Generic Desktop)
-  0x09, 0x39,        //   Usage (Hat switch)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x07,        //   Logical Maximum (7)
-  0x35, 0x00,        //   Physical Minimum (0)
-  0x46, 0x3B, 0x01,  //   Physical Maximum (315)
-  0x65, 0x14,        //   Unit (English Rotation: degrees)
-  0x75, 0x04,        //   Report Size (4)
-  0x95, 0x01,        //   Report Count (1)
-  0x81, 0x42,        //   Input (Data, Variable, Absolute, Null state)
-  0x65, 0x00,        //   Unit (None)
-  0x75, 0x04,        //   Report Size (4)
-  0x95, 0x01,        //   Report Count (1)
-  0x81, 0x03,        //   Input (Constant, Variable, Absolute)
-  0x09, 0x30,        //   Usage (X)
-  0x09, 0x31,        //   Usage (Y)
-  0x09, 0x33,        //   Usage (Rx)
-  0x09, 0x34,        //   Usage (Ry)
-  0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
-  0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
-  0x75, 0x10,        //   Report Size (16)
-  0x95, 0x04,        //   Report Count (4)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x09, 0x32,        //   Usage (Z)
-  0x09, 0x35,        //   Usage (Rz)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x02,        //   Report Count (2)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x85, 0x02,        //   Report ID (2)
-  0x06, 0x00, 0xFF,  //   Usage Page (Vendor-defined 0xFF00)
-  0x09, 0x01,        //   Usage (1)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x05,        //   Report Count (5)
-  0x91, 0x02,        //   Output (Data, Variable, Absolute)
-  0xC0,              // End Collection
-};
-
-// pid.codes holds VID 0x1209 for open-source projects and documents 0x0001 as
-// its test product ID. It is deliberately not a real vendor's identity. Request
-// an allocated product ID from pid.codes before a wide release so two different
-// virtual devices cannot collide on the same identity.
-inline constexpr std::uint16_t k_vibeshine_vendor_id = 0x1209;
-inline constexpr std::uint16_t k_vibeshine_product_id = 0x0001;
-inline constexpr std::uint16_t k_vibeshine_version = 0x0100;
-
-constexpr profile_definition k_generic_profile {
-  profile::generic_hid,
-  k_generic_gamepad_descriptor,
-  sizeof(k_generic_gamepad_descriptor),
-  k_vibeshine_vendor_id,
-  k_vibeshine_product_id,
-  k_vibeshine_version,
-  false,
-  nullptr,
-  0,
-};
-
-// The same game pad, plus the DirectInput PID report set. Kept as its own
-// profile so the plain descriptor stays available: if a host's HID stack
-// rejects the much larger PID descriptor, the caller can fall back without a
-// driver downgrade.
-//
-// The descriptor lives in another translation unit, so this is built once by a
-// thread-safe local static rather than by mutating a shared definition.
 // Xbox Series. This is the profile that reaches XInput: Windows attaches its
 // inbox xinputhid.sys filter by hardware ID, so a VHF child carrying a matching
 // ID becomes an XInput device without any bus driver. The identity travels with
@@ -182,20 +97,6 @@ constexpr profile_definition k_generic_profile {
   return definition;
 }
 
-[[nodiscard]] const profile_definition &generic_pid_profile() noexcept {
-  static const profile_definition definition = [] {
-    profile_definition value {};
-    value.id = profile::generic_pid;
-    value.report_descriptor = pid_gamepad_descriptor(&value.report_descriptor_size);
-    value.vendor_id = k_vibeshine_vendor_id;
-    value.product_id = k_vibeshine_product_id;
-    value.version_number = k_vibeshine_version;
-    value.force_feedback = true;
-    return value;
-  }();
-  return definition;
-}
-
 std::uint8_t encode_hat(const std::uint32_t buttons) noexcept {
   const bool up = (buttons & button_mask::dpad_up) != 0;
   const bool down = (buttons & button_mask::dpad_down) != 0;
@@ -249,9 +150,10 @@ std::uint32_t map_buttons(const std::uint32_t buttons) noexcept {
 const profile_definition *find_profile(const profile id) noexcept {
   switch (id) {
     case profile::generic_hid:
-      return &k_generic_profile;
     case profile::generic_pid:
-      return &generic_pid_profile();
+      // These protocol values remain reserved for compatibility, but neither
+      // profile may ship until this project has an accepted public VID/PID.
+      return nullptr;
     case profile::xbox_series:
       return &xbox_series_profile();
     // A real Xbox 360 pad is an XUSB device on a USB bus. That needs a bus

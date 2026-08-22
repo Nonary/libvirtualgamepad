@@ -36,8 +36,8 @@ The target profile set is deliberately explicit:
 
 | Profile | Contract |
 | --- | --- |
-| Generic HID | Standard HID Game Pad; implemented first. |
-| Generic HID + PID | The same game pad plus the DirectInput Physical Interface Device report set, so DirectInput reports the device as force-feedback capable. |
+| Generic HID | Protocol value reserved, but unavailable pending an accepted public VID/PID allocation. |
+| Generic HID + PID | Protocol value reserved, but unavailable pending an accepted public VID/PID allocation. Its report encoder remains for private-test research. |
 | Xbox 360 | Not reachable from VHF. A real Xbox 360 pad is an XUSB device on a USB bus, which needs a bus child that VHF cannot create. |
 | Xbox One | Reachable in principle by the same route as Xbox Series; not implemented until its report shape and feature behavior are tested. |
 | Xbox Series | Implemented. Native report shape plus the hardware ID that makes Windows attach its inbox XInput filter. |
@@ -140,21 +140,23 @@ The UMDF driver targets x64 and ARM64 Windows 10 or newer, uses UMDF 2.15 or
 newer, and links the inbox VHF user-mode import library (`VhfUm.lib`). It must
 not redistribute `VhfUm.dll` or `Vhf.sys`.
 
-The initial generic profile is intentionally a narrow proof of the VHF driver,
-control protocol, controller cleanup, and generic HID feedback path. It
-currently exposes 32 HID buttons, a hat switch, four signed axes, and two
-triggers. Adding a new profile is a driver change with descriptor and
-compatibility tests, not a configuration-only branding change.
+The generic report encoders remain as development seams for the VHF driver,
+control protocol, controller cleanup, and generic HID feedback path. Their
+protocol enum values are stable, but the public driver refuses both generic
+profiles until this project receives an accepted VID/PID allocation. Adding or
+enabling a profile is a driver change with descriptor and compatibility tests,
+not a configuration-only branding change.
 
 ## Device identity
 
 VHF leaves a HID child's VID/PID at zero unless the driver supplies them, which
-gives Windows and applications nothing to match on. Profiles therefore carry an
-identity, taken from the pid.codes open-source vendor ID (`0x1209`) with its
-documented test product ID. That identity is deliberately not a real vendor's:
-a descriptor is never relabelled as somebody else's product by changing a
-VID/PID. Request an allocated product ID from pid.codes before a wide release
-so two virtual devices cannot collide.
+gives Windows and applications nothing to match on. pid.codes reserves
+`1209:0001` for private testing only, so the public driver does not define,
+advertise, or create either generic profile with that identity. Their enum
+values remain reserved for protocol compatibility until this project receives
+an accepted public allocation. The DirectInput probes retain `1209:0001` only
+as explicitly labelled private-test source references and are not release
+profiles.
 
 ## XInput
 
@@ -175,13 +177,14 @@ create. No descriptor makes that profile honest, so `find_profile` refuses it.
 
 ## Force feedback
 
-`profile::generic_pid` publishes the DirectInput PID report set alongside the
-game pad collection: Set Effect, Set Envelope, Set Condition, Set Periodic, Set
-Constant Force, Set Ramp Force, Effect Operation, PID Block Free, PID Device
-Control, and Device Gain as output reports, plus Create New Effect, PID Block
-Load, and PID Pool as feature reports, and a PID State input report. Windows
-only reports `DIDC_FORCEFEEDBACK` when that set parses, so a plain
-vendor-defined output report never reaches a DirectInput application.
+The reserved `profile::generic_pid` encoder publishes the DirectInput PID report
+set alongside the game pad collection: Set Effect, Set Envelope, Set Condition,
+Set Periodic, Set Constant Force, Set Ramp Force, Effect Operation, PID Block
+Free, PID Device Control, and Device Gain as output reports, plus Create New
+Effect, PID Block Load, and PID Pool as feature reports, and a PID State input
+report. It remains useful for private-test research, but `find_profile()` refuses
+it and the public driver does not advertise or create it pending an accepted
+VID/PID allocation.
 
 The driver reduces effects to the same rumble values the rest of the protocol
 already carries. Constant force and ramps drive the low-frequency motor;

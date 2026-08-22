@@ -32,6 +32,7 @@ BOOL CALLBACK enum_ff(const DIDEVICEINSTANCEW *const instance, void *) {
 }  // namespace
 
 int main() {
+  std::printf("PRIVATE TEST ONLY: generic_pid has no public PID and is refused by release drivers.\n");
   lvg::client client;
   if (client.connect() != ERROR_SUCCESS) {
     std::printf("connect failed\n");
