@@ -352,7 +352,8 @@ function Assert-ReleaseObject {
         [Parameter(Mandatory = $true)][long] $ExpectedId,
         [Parameter(Mandatory = $true)][bool] $ExpectedDraft,
         [Parameter(Mandatory = $true)][string] $ExpectedTag,
-        [Parameter(Mandatory = $true)][string] $ExpectedBody
+        [Parameter(Mandatory = $true)][string] $ExpectedBody,
+        [switch] $RequireImmutable
     )
 
     if ($Release.draft -isnot [bool] -or $Release.prerelease -isnot [bool]) {
@@ -365,6 +366,40 @@ function Assert-ReleaseObject {
         $Release.draft -ne $ExpectedDraft -or
         $Release.prerelease -ne $true) {
         throw "GitHub release $ExpectedId does not match the captured tag, title, body, draft, or prerelease state."
+    }
+    if ($RequireImmutable -and
+        ($Release.immutable -isnot [bool] -or $Release.immutable -ne $true)) {
+        throw "GitHub release $ExpectedId is published but is not reported as immutable."
+    }
+}
+
+function Assert-RepositoryImmutableReleasesEnabled {
+    $response = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/immutable-releases"
+    if ([int] $response.StatusCode -ne 200) {
+        throw "Cannot prove repository immutable releases are enabled: GitHub returned HTTP $($response.StatusCode)."
+    }
+    $setting = Get-ResponseJson -Response $response -Operation 'Check repository immutable releases'
+    if ($setting.enabled -isnot [bool] -or
+        $setting.enforced_by_owner -isnot [bool] -or
+        $setting.enabled -ne $true) {
+        throw 'Repository immutable releases are disabled or GitHub returned an invalid setting response.'
+    }
+}
+
+function Assert-LightweightTagTarget {
+    param(
+        [Parameter(Mandatory = $true)][string] $ExpectedTag,
+        [Parameter(Mandatory = $true)][string] $ExpectedRevision
+    )
+
+    $encodedRefTag = [System.Uri]::EscapeDataString($ExpectedTag)
+    $response = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/git/ref/tags/$encodedRefTag"
+    Assert-HttpStatus -Response $response -ExpectedStatus 200 -Operation "Resolve tag '$ExpectedTag'"
+    $tagRef = Get-ResponseJson -Response $response -Operation "Resolve tag '$ExpectedTag'"
+    if ([string] $tagRef.ref -cne "refs/tags/$ExpectedTag" -or
+        [string] $tagRef.object.type -cne 'commit' -or
+        [string] $tagRef.object.sha -cne $ExpectedRevision) {
+        throw "Tag '$ExpectedTag' is not a lightweight reference to exact commit '$ExpectedRevision'."
     }
 }
 
@@ -385,12 +420,12 @@ $script:ApiBase = "https://api.github.com/repos/$Repository"
 $script:JsonHeaders = @{
     Authorization = "Bearer $Token"
     Accept = 'application/vnd.github+json'
-    'X-GitHub-Api-Version' = '2022-11-28'
+    'X-GitHub-Api-Version' = '2026-03-10'
 }
 $script:BinaryHeaders = @{
     Authorization = "Bearer $Token"
     Accept = 'application/octet-stream'
-    'X-GitHub-Api-Version' = '2022-11-28'
+    'X-GitHub-Api-Version' = '2026-03-10'
 }
 
 $internal = Assert-ReleaseSet `
@@ -430,17 +465,20 @@ do {
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("libvirtualgamepad-publish-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 $createdDraftReleaseId = $null
+$publicationSucceeded = $false
 $transactionComplete = $false
+$createPayload = [ordered]@{
+    tag_name = $Tag
+    target_commitish = $SourceRevision
+    name = $Tag
+    body = $releaseBody
+    draft = [bool] $true
+    prerelease = [bool] $true
+}
 
 try {
-    $createPayload = [ordered]@{
-        tag_name = $Tag
-        target_commitish = $SourceRevision
-        name = $Tag
-        body = $releaseBody
-        draft = [bool] $true
-        prerelease = [bool] $true
-    }
+    Assert-RepositoryImmutableReleasesEnabled
+    Assert-LightweightTagTarget -ExpectedTag $Tag -ExpectedRevision $SourceRevision
     $createResponse = Invoke-GitHubJson -Method Post -Uri "$script:ApiBase/releases" -Body $createPayload
     Assert-HttpStatus -Response $createResponse -ExpectedStatus 201 -Operation "Create draft release '$Tag'"
     $created = Get-ResponseJson -Response $createResponse -Operation "Create draft release '$Tag'"
@@ -475,7 +513,7 @@ try {
         $encodedName = [System.Uri]::EscapeDataString($name)
         $uploadResponse = Invoke-WebRequest `
             -Method Post `
-            -Uri "$uploadBaseText?name=$encodedName" `
+            -Uri "${uploadBaseText}?name=$encodedName" `
             -Headers $script:JsonHeaders `
             -ContentType 'application/octet-stream' `
             -InFile $path `
@@ -519,28 +557,32 @@ try {
         draft = [bool] $false
         prerelease = [bool] $true
     }
+    Assert-RepositoryImmutableReleasesEnabled
+    Assert-LightweightTagTarget -ExpectedTag $Tag -ExpectedRevision $SourceRevision
     $publishResponse = Invoke-GitHubJson `
         -Method Patch `
         -Uri "$script:ApiBase/releases/$createdDraftReleaseId" `
         -Body $publishPayload
     Assert-HttpStatus -Response $publishResponse -ExpectedStatus 200 -Operation "Publish release $createdDraftReleaseId"
+    $publicationSucceeded = $true
     $published = Get-ResponseJson -Response $publishResponse -Operation "Publish release $createdDraftReleaseId"
     Assert-ReleaseObject `
         -Release $published `
         -ExpectedId $createdDraftReleaseId `
         -ExpectedDraft $false `
         -ExpectedTag $Tag `
-        -ExpectedBody $releaseBody
+        -ExpectedBody $releaseBody `
+        -RequireImmutable
 
     $idResponse = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/releases/$createdDraftReleaseId"
     Assert-HttpStatus -Response $idResponse -ExpectedStatus 200 -Operation "Refetch published release by ID"
     $byId = Get-ResponseJson -Response $idResponse -Operation "Refetch published release by ID"
-    Assert-ReleaseObject -Release $byId -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody
+    Assert-ReleaseObject -Release $byId -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody -RequireImmutable
 
     $tagResponse = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/releases/tags/$encodedTag"
     Assert-HttpStatus -Response $tagResponse -ExpectedStatus 200 -Operation "Refetch published release by tag"
     $byTag = Get-ResponseJson -Response $tagResponse -Operation "Refetch published release by tag"
-    Assert-ReleaseObject -Release $byTag -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody
+    Assert-ReleaseObject -Release $byTag -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody -RequireImmutable
 
     $publishedAssets = Get-ReleaseAssets -ReleaseId $createdDraftReleaseId
     $publishedAssetsByName = Assert-AssetSet `
@@ -565,20 +607,54 @@ try {
     Assert-DirectoryHashesEqual -ExpectedRoot $ReleaseDir -ActualRoot $publishedDownload -Names $expectedFiles
     Assert-DirectoryHashesEqual -ExpectedRoot $draftDownload -ActualRoot $publishedDownload -Names $expectedFiles
 
+    $finalIdResponse = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/releases/$createdDraftReleaseId"
+    Assert-HttpStatus -Response $finalIdResponse -ExpectedStatus 200 -Operation 'Final release verification by ID'
+    $finalById = Get-ResponseJson -Response $finalIdResponse -Operation 'Final release verification by ID'
+    Assert-ReleaseObject -Release $finalById -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody -RequireImmutable
+    $null = Assert-AssetSet -Assets @($finalById.assets) -ExpectedNames $expectedFiles -ExpectedSizes $internal.Sizes -ExpectedIds $uploadedIds
+
+    $finalTagResponse = Invoke-GitHubJson -Method Get -Uri "$script:ApiBase/releases/tags/$encodedTag"
+    Assert-HttpStatus -Response $finalTagResponse -ExpectedStatus 200 -Operation 'Final release verification by tag'
+    $finalByTag = Get-ResponseJson -Response $finalTagResponse -Operation 'Final release verification by tag'
+    Assert-ReleaseObject -Release $finalByTag -ExpectedId $createdDraftReleaseId -ExpectedDraft $false -ExpectedTag $Tag -ExpectedBody $releaseBody -RequireImmutable
+    $null = Assert-AssetSet -Assets @($finalByTag.assets) -ExpectedNames $expectedFiles -ExpectedSizes $internal.Sizes -ExpectedIds $uploadedIds
+
     $transactionComplete = $true
     Write-Output "Published release '$Tag' as ID $createdDraftReleaseId with four verified immutable assets."
 } finally {
-    if (-not $transactionComplete -and $null -ne $createdDraftReleaseId) {
-        $deleteUri = "$script:ApiBase/releases/$createdDraftReleaseId"
+    if (-not $transactionComplete -and $null -ne $createdDraftReleaseId -and $publicationSucceeded) {
+        Write-Warning "Publication succeeded; preserving captured release ID $createdDraftReleaseId for inspection because an immutable release tag name cannot be reused."
+    } elseif (-not $transactionComplete -and $null -ne $createdDraftReleaseId) {
         try {
-            $deleteResponse = Invoke-GitHubJson -Method Delete -Uri $deleteUri
-            if ([int] $deleteResponse.StatusCode -notin @(204, 404)) {
-                Write-Warning "Cleanup of captured release ID $createdDraftReleaseId failed with HTTP $($deleteResponse.StatusCode)."
+            $cleanupUri = "$script:ApiBase/releases/$createdDraftReleaseId"
+            $cleanupLookup = Invoke-GitHubJson -Method Get -Uri $cleanupUri
+            if ([int] $cleanupLookup.StatusCode -eq 404) {
+                Write-Output "Captured draft release ID $createdDraftReleaseId is already absent."
+            } elseif ([int] $cleanupLookup.StatusCode -ne 200) {
+                Write-Warning "Preserving captured release ID $createdDraftReleaseId because draft state could not be proven (HTTP $($cleanupLookup.StatusCode))."
             } else {
-                Write-Output "Cleaned up captured release ID $createdDraftReleaseId after transaction failure."
+                $cleanupRelease = Get-ResponseJson -Response $cleanupLookup -Operation "Inspect captured release $createdDraftReleaseId before cleanup"
+                $isOwnedDraft = (
+                    [long] $cleanupRelease.id -eq $createdDraftReleaseId -and
+                    [string] $cleanupRelease.tag_name -ceq $Tag -and
+                    $cleanupRelease.draft -is [bool] -and
+                    $cleanupRelease.draft -eq $true -and
+                    $cleanupRelease.immutable -is [bool] -and
+                    $cleanupRelease.immutable -eq $false
+                )
+                if (-not $isOwnedDraft) {
+                    Write-Warning "Preserving captured release ID $createdDraftReleaseId because it is not confirmed as the mutable unpublished draft created by this run."
+                } else {
+                    $deleteResponse = Invoke-GitHubJson -Method Delete -Uri $cleanupUri
+                    if ([int] $deleteResponse.StatusCode -notin @(204, 404)) {
+                        Write-Warning "Cleanup of captured draft release ID $createdDraftReleaseId failed with HTTP $($deleteResponse.StatusCode)."
+                    } else {
+                        Write-Output "Cleaned up captured unpublished draft release ID $createdDraftReleaseId after pre-publication failure."
+                    }
+                }
             }
         } catch {
-            Write-Warning "Cleanup of captured release ID $createdDraftReleaseId failed: $($_.Exception.Message)"
+            Write-Warning "Cleanup inspection for captured release ID $createdDraftReleaseId failed: $($_.Exception.Message)"
         }
     }
 
