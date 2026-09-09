@@ -45,6 +45,7 @@ inline constexpr std::uint8_t k_ds5_flag1_power_save = 0x02;
 inline constexpr std::uint8_t k_ds5_flag1_lightbar = 0x04;
 inline constexpr std::uint8_t k_ds5_flag1_release_leds = 0x08;
 inline constexpr std::uint8_t k_ds5_flag1_player_indicator = 0x10;
+inline constexpr std::uint8_t k_ds5_flag2_compatible_vibration = 0x04;
 
 #pragma pack(push, 1)
 
@@ -164,6 +165,12 @@ struct ds5_state {
 [[nodiscard]] bool decode_ds5_output(
   const ds5_output_report &output,
   playstation_output_feedback *feedback) noexcept;
+
+// Retains fields absent from this report, including the other trigger's
+// program. A trigger is disabled by an explicit enabled report with mode off.
+[[nodiscard]] bool apply_ds5_output(
+  const ds5_output_report &output,
+  playstation_output_feedback *state) noexcept;
 
 [[nodiscard]] std::size_t fill_ds5_feature(
   std::uint8_t report_id,

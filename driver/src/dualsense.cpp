@@ -396,13 +396,25 @@ bool apply_ds5_battery(const battery_state_request &battery, ds5_state *const st
 bool decode_ds5_output(
   const ds5_output_report &output,
   playstation_output_feedback *const feedback) noexcept {
+  playstation_output_feedback decoded {};
+  if (feedback == nullptr || !apply_ds5_output(output, &decoded)) {
+    return false;
+  }
+  *feedback = decoded;
+  return true;
+}
+
+bool apply_ds5_output(
+  const ds5_output_report &output,
+  playstation_output_feedback *const feedback) noexcept {
   if (feedback == nullptr || output.report_id != k_ds5_output_report_id) {
     return false;
   }
 
-  *feedback = {};
-
-  if (output.valid_flag0 & k_ds5_flag0_compatible_vibration) {
+  // Newer host drivers use vibration-v2 in flag2 instead of flag0's legacy
+  // enable bit. Both formats carry their motor amplitudes in the same bytes.
+  if ((output.valid_flag0 & k_ds5_flag0_compatible_vibration) ||
+      (output.valid_flag2 & k_ds5_flag2_compatible_vibration)) {
     feedback->low_frequency = static_cast<std::uint16_t>(output.motor_left << 8);
     feedback->high_frequency = static_cast<std::uint16_t>(output.motor_right << 8);
   }
@@ -424,9 +436,8 @@ bool decode_ds5_output(
     feedback->valid |= ps_output_microphone_led_valid;
   }
 
-  // Each trigger is programmed independently, and a report may carry one
-  // without the other. Anything not enabled stays at mode 0 (off) rather than
-  // repeating the last program, which would keep a released effect alive.
+  // Each trigger is programmed independently. An omitted trigger keeps its
+  // current program; an explicit off program releases it.
   if (output.valid_flag0 & k_ds5_flag0_left_trigger_effect) {
     feedback->left_trigger.mode = output.left_trigger.mode;
     std::memcpy(feedback->left_trigger.parameters, output.left_trigger.parameters,

@@ -1316,8 +1316,8 @@ int main() {
     check(fb.left_trigger.parameters[0] == 0xBB, "the left trigger parameters follow its mode");
     check((fb.valid & ps_output_triggers_valid) != 0, "the trigger effects are marked valid");
 
-    // A report that enables nothing must not carry the previous program
-    // forward, or a released effect stays armed.
+    // Stateless decoding ignores data without its validity bit. Stateful
+    // application below preserves the previously enabled actuator values.
     std::uint8_t idle[48] {};
     idle[0] = 0x02;
     idle[3] = 0x40;
@@ -1332,7 +1332,7 @@ int main() {
     check(quiet_fb.red == 0, "the light bar is ignored without its enable bit");
     check(quiet_fb.valid == 0, "nothing is marked valid");
     check(quiet_fb.left_trigger.mode == 0 && quiet_fb.right_trigger.mode == 0,
-          "trigger effects reset rather than repeat");
+          "invalid trigger bytes are ignored by stateless decoding");
 
     // A foreign report id must be refused rather than parsed as ours.
     ds5_output_report wrong {};
@@ -1473,6 +1473,101 @@ int main() {
           "an Xbox One pad silently has no Share button");
     const xbox_series_input_report series_with_share = encode_xbox_series_input(with_share);
     check(series_with_share.share == 1, "a Series pad still reports Share");
+  }
+
+  {
+    playstation_output_feedback state {};
+    ds4_output_report rumble {};
+    rumble.report_id = k_ds4_output_report_id;
+    rumble.flags = 0x01;
+    rumble.left_rumble = 0x80;
+    rumble.right_rumble = 0x40;
+    check(apply_ds4_output(rumble, &state), "ds4 starts rumble");
+
+    ds4_output_report light {};
+    light.report_id = k_ds4_output_report_id;
+    light.flags = 0x02;
+    light.red = 0x20;
+    check(apply_ds4_output(light, &state), "ds4 applies a later LED-only report");
+    const auto pending = encode_playstation_feedback(0, state);
+    playstation_output_feedback polled {};
+    std::memcpy(&polled, pending.payload, sizeof(polled));
+    check(polled.low_frequency == 0x8000 && polled.high_frequency == 0x4000,
+          "ds4 LED output does not erase rumble before a feedback poll");
+    check(polled.red == 0x20, "ds4 coalesced report also carries the new LED");
+
+    rumble.left_rumble = rumble.right_rumble = 0;
+    check(apply_ds4_output(rumble, &state), "ds4 accepts an explicit motor stop");
+    check(state.low_frequency == 0 && state.high_frequency == 0,
+          "ds4 stops both motors when their enabled values are zero");
+    check(state.red == 0x20 && (state.valid & ps_output_lightbar_valid),
+          "ds4 rumble-only output retains the LED across polls");
+  }
+
+  {
+    playstation_output_feedback state {};
+    ds5_output_report output {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_compatible_vibration | k_ds5_flag0_right_trigger_effect;
+    output.motor_left = 0x90;
+    output.motor_right = 0x30;
+    output.right_trigger.mode = 0x26;
+    output.right_trigger.parameters[0] = 0xAB;
+    check(apply_ds5_output(output, &state), "ds5 applies rumble and right trigger");
+
+    output = {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_left_trigger_effect;
+    output.left_trigger.mode = 0x21;
+    output.left_trigger.parameters[0] = 0xCD;
+    check(apply_ds5_output(output, &state), "ds5 accepts a separate left trigger program");
+    check(state.right_trigger.mode == 0x26 && state.right_trigger.parameters[0] == 0xAB,
+          "ds5 left trigger update preserves the right trigger");
+    check(state.low_frequency == 0x9000 && state.high_frequency == 0x3000,
+          "ds5 trigger-only update preserves rumble");
+
+    output = {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag1 = k_ds5_flag1_lightbar;
+    output.lightbar_blue = 0x55;
+    check(apply_ds5_output(output, &state), "ds5 applies an independent lightbar update");
+    const auto pending = encode_playstation_feedback(1, state);
+    playstation_output_feedback polled {};
+    std::memcpy(&polled, pending.payload, sizeof(polled));
+    check(polled.left_trigger.mode == 0x21 && polled.right_trigger.mode == 0x26 &&
+            polled.low_frequency == 0x9000 && polled.blue == 0x55,
+          "ds5 polling receives all accumulated actuators after coalescing");
+
+    output = {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_left_trigger_effect;
+    check(apply_ds5_output(output, &state), "ds5 accepts an explicit left trigger off program");
+    check(state.left_trigger.mode == 0 && state.left_trigger.parameters[0] == 0 &&
+            state.right_trigger.mode == 0x26,
+          "ds5 disabling one trigger leaves the other programmed");
+
+    const auto retained = state;
+    output.report_id = 0x7F;
+    check(!apply_ds5_output(output, &state), "ds5 refuses a foreign output report");
+    check(std::memcmp(&state, &retained, sizeof(state)) == 0,
+          "an invalid output report cannot change retained actuators");
+  }
+
+  {
+    ds5_output_report output {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_haptics_select;
+    output.valid_flag2 = 0x04; // Compatible vibration v2, independent of legacy flag0 bit 0
+    output.motor_left = 0x60;
+    output.motor_right = 0x20;
+    playstation_output_feedback feedback {};
+    check(decode_ds5_output(output, &feedback), "ds5 vibration-v2 report decodes");
+    check(feedback.low_frequency == 0x6000 && feedback.high_frequency == 0x2000,
+          "ds5 vibration-v2 motor amplitudes reach feedback");
+    output.motor_left = output.motor_right = 0;
+    check(apply_ds5_output(output, &feedback), "ds5 vibration-v2 stop applies");
+    check(feedback.low_frequency == 0 && feedback.high_frequency == 0,
+          "ds5 vibration-v2 can stop the motors");
   }
 
   if (g_failures == 0) {

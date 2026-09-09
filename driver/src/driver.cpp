@@ -62,6 +62,9 @@ struct controller_slot {
   slot_state state;
   bool feedback_pending;
   lvg::feedback_event feedback;
+  // Output reports update independently enabled fields. Keep the full state
+  // across polls so coalescing never drops rumble or the other trigger.
+  lvg::playstation_output_feedback playstation_feedback;
   // Set from the profile, so an output report is only interpreted as PID when
   // the descriptor actually declared the PID collection.
   bool force_feedback;
@@ -325,6 +328,7 @@ void destroy_owned_controller(
   slot.selected_profile = request.requested_profile;
   slot.state = slot_state::starting;
   slot.feedback_pending = false;
+  slot.playstation_feedback = {};
   slot.force_feedback = definition->force_feedback;
   slot.pid_rumble_valid = false;
   slot.pid_rumble = {};
@@ -1094,7 +1098,8 @@ void evt_vhf_write_report(
     using namespace lvg::driver;
 
     auto *const context = slot->parent;
-    lvg::playstation_output_feedback feedback {};
+    lock_context(context);
+    lvg::playstation_output_feedback feedback = slot->playstation_feedback;
     bool decoded = false;
 
     if (slot->selected_profile == lvg::profile::dualshock_4) {
@@ -1102,23 +1107,23 @@ void evt_vhf_write_report(
       if (transfer->reportBuffer != nullptr &&
           transfer->reportBufferLen >= sizeof(output)) {
         std::memcpy(&output, transfer->reportBuffer, sizeof(output));
-        decoded = decode_ds4_output(output, &feedback);
+        decoded = apply_ds4_output(output, &feedback);
       }
     } else {
       ds5_output_report output {};
       if (transfer->reportBuffer != nullptr &&
           transfer->reportBufferLen >= sizeof(output)) {
         std::memcpy(&output, transfer->reportBuffer, sizeof(output));
-        decoded = decode_ds5_output(output, &feedback);
+        decoded = apply_ds5_output(output, &feedback);
       }
     }
 
-    lock_context(context);
     if (context->stopping || slot->state != slot_state::active) {
       status = STATUS_DEVICE_NOT_READY;
     } else if (!decoded) {
       status = STATUS_INVALID_PARAMETER;
     } else {
+      slot->playstation_feedback = feedback;
       slot->feedback = encode_playstation_feedback(slot->controller_id, feedback);
       slot->feedback_pending = true;  // Coalesce to the current actuator state.
       status = STATUS_SUCCESS;

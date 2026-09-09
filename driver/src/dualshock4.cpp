@@ -435,19 +435,29 @@ bool apply_ds4_battery(const battery_state_request &battery, ds4_state *const st
 bool decode_ds4_output(
   const ds4_output_report &output,
   playstation_output_feedback *const feedback) noexcept {
+  playstation_output_feedback decoded {};
+  if (feedback == nullptr || !apply_ds4_output(output, &decoded)) {
+    return false;
+  }
+  *feedback = decoded;
+  return true;
+}
+
+bool apply_ds4_output(
+  const ds4_output_report &output,
+  playstation_output_feedback *const feedback) noexcept {
   if (feedback == nullptr || output.report_id != k_ds4_output_report_id) {
     return false;
   }
 
-  *feedback = {};
   const bool rumble_valid = (output.flags & 0x01) != 0;
   const bool lightbar_valid = (output.flags & 0x02) != 0;
 
   // 8-bit motors widen to the 16-bit range the rest of the protocol uses.
-  feedback->low_frequency =
-    rumble_valid ? static_cast<std::uint16_t>(output.left_rumble << 8) : 0;
-  feedback->high_frequency =
-    rumble_valid ? static_cast<std::uint16_t>(output.right_rumble << 8) : 0;
+  if (rumble_valid) {
+    feedback->low_frequency = static_cast<std::uint16_t>(output.left_rumble << 8);
+    feedback->high_frequency = static_cast<std::uint16_t>(output.right_rumble << 8);
+  }
 
   if (lightbar_valid) {
     feedback->red = output.red;

@@ -158,6 +158,12 @@ struct ds4_state {
   const ds4_output_report &output,
   playstation_output_feedback *feedback) noexcept;
 
+// Applies only fields enabled by the report to a controller's retained output
+// state. Use this before coalescing: an LED update must not stop the motors.
+[[nodiscard]] bool apply_ds4_output(
+  const ds4_output_report &output,
+  playstation_output_feedback *state) noexcept;
+
 // Fills a feature report. Returns the number of bytes written, or 0 when the
 // report is not one this profile answers.
 [[nodiscard]] std::size_t fill_ds4_feature(
