@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "libvirtualgamepad/protocol.h"
+#include "libvirtualgamepad/ds5_usb.h"
 
 namespace lvg::driver {
 
@@ -135,6 +136,7 @@ static_assert(offsetof(ds5_output_report, lightbar_green) == 46);
 static_assert(offsetof(ds5_output_report, lightbar_blue) == 47);
 
 struct ds5_state {
+  lvg::ds5_usb::feature_state features;
   std::uint8_t sequence;
   std::uint32_t sensor_timestamp;
   std::uint8_t battery_level;
@@ -168,6 +170,7 @@ struct ds5_state {
 [[nodiscard]] std::size_t fill_ds5_feature(
   std::uint8_t report_id,
   std::uint8_t *buffer,
-  std::size_t capacity) noexcept;
+  std::size_t capacity,
+  const lvg::ds5_usb::feature_state &state = {}) noexcept;
 
 }  // namespace lvg::driver
