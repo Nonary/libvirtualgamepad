@@ -8,112 +8,6 @@
 namespace lvg::driver {
 namespace {
 
-// A DualShock 4's USB report descriptor: a 64-byte input report on ID 1, a
-// 32-byte output report on ID 5, and the vendor feature reports its host-side
-// initialization reads. The input report's interior structure is vendor-defined
-// on real hardware beyond the sticks, triggers, hat, and buttons, which is why
-// the motion and touch bytes are declared as vendor-defined padding rather than
-// as Generic Desktop usages.
-constexpr std::uint8_t k_ds4_descriptor[] = {
-  0x05, 0x01,        // Usage Page (Generic Desktop)
-  0x09, 0x05,        // Usage (Game Pad)
-  0xA1, 0x01,        // Collection (Application)
-  0x85, 0x01,        //   Report ID (1)
-  0x09, 0x30,        //   Usage (X)
-  0x09, 0x31,        //   Usage (Y)
-  0x09, 0x32,        //   Usage (Z)
-  0x09, 0x35,        //   Usage (Rz)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x04,        //   Report Count (4)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x09, 0x39,        //   Usage (Hat switch)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x07,        //   Logical Maximum (7)
-  0x35, 0x00,        //   Physical Minimum (0)
-  0x46, 0x3B, 0x01,  //   Physical Maximum (315)
-  0x65, 0x14,        //   Unit (English Rotation: Degrees)
-  0x75, 0x04,        //   Report Size (4)
-  0x95, 0x01,        //   Report Count (1)
-  0x81, 0x42,        //   Input (Data, Variable, Absolute, Null state)
-  0x65, 0x00,        //   Unit (None)
-  0x05, 0x09,        //   Usage Page (Button)
-  0x19, 0x01,        //   Usage Minimum (1)
-  0x29, 0x0E,        //   Usage Maximum (14)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x01,        //   Logical Maximum (1)
-  0x75, 0x01,        //   Report Size (1)
-  0x95, 0x0E,        //   Report Count (14)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x06, 0x00, 0xFF,  //   Usage Page (Vendor-defined 0xFF00)
-  0x09, 0x20,        //   Usage (0x20)
-  0x75, 0x06,        //   Report Size (6)
-  0x95, 0x01,        //   Report Count (1)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x3F,        //   Logical Maximum (63)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x05, 0x01,        //   Usage Page (Generic Desktop)
-  0x09, 0x33,        //   Usage (Rx)
-  0x09, 0x34,        //   Usage (Ry)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x02,        //   Report Count (2)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x06, 0x00, 0xFF,  //   Usage Page (Vendor-defined 0xFF00)
-  0x09, 0x21,        //   Usage (0x21)
-  0x95, 0x36,        //   Report Count (54)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x85, 0x05,        //   Report ID (5)
-  0x09, 0x22,        //   Usage (0x22)
-  0x95, 0x1F,        //   Report Count (31)
-  0x91, 0x02,        //   Output (Data, Variable, Absolute)
-  0x85, 0x02,        //   Report ID (2)
-  0x09, 0x24,        //   Usage (0x24)
-  0x95, 0x24,        //   Report Count (36)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0x85, 0x12,        //   Report ID (18)
-  0x09, 0x2E,        //   Usage (0x2E)
-  0x95, 0x0F,        //   Report Count (15)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0x85, 0xA3,        //   Report ID (163)
-  0x09, 0x25,        //   Usage (0x25)
-  0x95, 0x30,        //   Report Count (48)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0xC0,              // End Collection
-};
-
-// Identity calibration: zero bias and a symmetric range that reduces to the
-// device's nominal counts-per-unit. Inventing a plausible-looking non-identity
-// calibration would silently skew every motion sample a consumer computes.
-constexpr std::uint8_t k_ds4_calibration[36] = {
-  k_ds4_feature_calibration_id,
-  0x00, 0x00,  // gyro pitch bias
-  0x00, 0x00,  // gyro yaw bias
-  0x00, 0x00,  // gyro roll bias
-  0x00, 0x20,  // gyro pitch plus   (+8192)
-  0x00, 0xE0,  // gyro pitch minus  (-8192)
-  0x00, 0x20,  // gyro yaw plus
-  0x00, 0xE0,  // gyro yaw minus
-  0x00, 0x20,  // gyro roll plus
-  0x00, 0xE0,  // gyro roll minus
-  0x00, 0x20,  // gyro speed plus
-  0x00, 0x20,  // gyro speed minus
-  0x00, 0x20,  // accel x plus      (+8192)
-  0x00, 0xE0,  // accel x minus     (-8192)
-  0x00, 0x20,  // accel y plus
-  0x00, 0xE0,  // accel y minus
-  0x00, 0x20,  // accel z plus
-  0x00, 0xE0,  // accel z minus
-  0x00,        // padding
-};
-
-// A locally administered MAC: the second-least-significant bit of the first
-// octet marks it as not globally assigned, so it cannot collide with a real
-// Sony device's address.
-constexpr std::uint8_t k_ds4_mac[6] = {0x02, 0x56, 0x47, 0x50, 0x41, 0x44};
-
 [[nodiscard]] std::uint8_t encode_hat(const std::uint32_t buttons) noexcept {
   const bool up = (buttons & button_mask::dpad_up) != 0;
   const bool down = (buttons & button_mask::dpad_down) != 0;
@@ -181,6 +75,7 @@ void pack_touch_point(ds4_touch_point *const point,
 }  // namespace
 
 void ds4_state::reset() noexcept {
+  features = {};
   report_counter = 0;
   timestamp = 0;
   touch_timestamp = 0;
@@ -204,9 +99,9 @@ void ds4_state::reset() noexcept {
 
 const std::uint8_t *ds4_descriptor(std::size_t *const size) noexcept {
   if (size != nullptr) {
-    *size = sizeof(k_ds4_descriptor);
+    *size = lvg::ds4_usb::report_descriptor_size;
   }
-  return k_ds4_descriptor;
+  return reinterpret_cast<const std::uint8_t *>(lvg::ds4_usb::report_descriptor);
 }
 
 ds4_input_report encode_ds4_input(
@@ -461,49 +356,9 @@ bool decode_ds4_output(
 std::size_t fill_ds4_feature(
   const std::uint8_t report_id,
   std::uint8_t *const buffer,
-  const std::size_t capacity) noexcept {
-  if (buffer == nullptr) {
-    return 0;
-  }
-
-  switch (report_id) {
-    case k_ds4_feature_calibration_id: {
-      if (capacity < sizeof(k_ds4_calibration)) {
-        return 0;
-      }
-      std::memcpy(buffer, k_ds4_calibration, sizeof(k_ds4_calibration));
-      return sizeof(k_ds4_calibration);
-    }
-    case k_ds4_feature_pairing_id: {
-      // Report id, the device address, then the host address slot.
-      constexpr std::size_t k_size = 16;
-      if (capacity < k_size) {
-        return 0;
-      }
-      std::memset(buffer, 0, k_size);
-      buffer[0] = k_ds4_feature_pairing_id;
-      std::memcpy(buffer + 1, k_ds4_mac, sizeof(k_ds4_mac));
-      return k_size;
-    }
-    case k_ds4_feature_firmware_id: {
-      constexpr std::size_t k_size = 49;
-      if (capacity < k_size) {
-        return 0;
-      }
-      std::memset(buffer, 0, k_size);
-      buffer[0] = k_ds4_feature_firmware_id;
-      // A real device returns a build date string here. Consumers only parse
-      // the version words that follow, so the string stays empty rather than
-      // impersonating a specific factory build.
-      buffer[35] = 0x00;
-      buffer[36] = 0x01;  // Firmware version
-      buffer[41] = 0x00;
-      buffer[42] = 0x01;  // Hardware version
-      return k_size;
-    }
-    default:
-      return 0;
-  }
+  const std::size_t capacity,
+  const lvg::ds4_usb::feature_state &state) noexcept {
+  return lvg::ds4_usb::get_feature(report_id, buffer, capacity, state);
 }
 
 feedback_event encode_playstation_feedback(

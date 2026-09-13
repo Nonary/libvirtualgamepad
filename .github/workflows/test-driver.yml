@@ -1,0 +1,26 @@
+name: Controller protocol tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Configure and build controller tests
+        shell: pwsh
+        run: |
+          cmake -S driver/tests -B build/contract-tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/contract-tests --config Release
+          exit $LASTEXITCODE
+      - name: Test descriptors and native USB initialization
+        run: ctest --test-dir build/contract-tests -C Release --output-on-failure
