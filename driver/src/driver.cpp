@@ -1711,6 +1711,11 @@ NTSTATUS evt_release_hardware(WDFDEVICE device, WDFCMRESLIST) {
 }
 
 NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
+  // The INF installs this UMDF component above the inbox VHF function driver.
+  // Tell WDF that this is a filter so VHF remains the sole power-policy owner
+  // for the device stack.
+  WdfFdoInitSetFilter(device_init);
+
   WDF_FILEOBJECT_CONFIG file_config;
   WDF_FILEOBJECT_CONFIG_INIT(
     &file_config,
@@ -1794,6 +1799,9 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
 
   WDF_IO_QUEUE_CONFIG queue_config;
   WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queue_config, WdfIoQueueDispatchSequential);
+  // Filter queues default to non-power-managed. Keep control requests tied to
+  // the device power state so stop and resume cannot race controller I/O.
+  queue_config.PowerManaged = WdfTrue;
   queue_config.EvtIoDeviceControl = evt_io_device_control;
   return WdfIoQueueCreate(device, &queue_config, WDF_NO_OBJECT_ATTRIBUTES, nullptr);
 }
