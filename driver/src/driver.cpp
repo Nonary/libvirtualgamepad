@@ -338,6 +338,7 @@ void destroy_owned_controller(
   slot.have_last_input = false;
   slot.last_input = {};
   slot.ds4.reset();
+  slot.ds4.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.ds5.reset();
   slot.switch_pro.reset();
   slot.pump.reset();
@@ -1230,7 +1231,7 @@ void evt_vhf_get_feature(
     } else {
       const std::size_t written =
         slot->selected_profile == lvg::profile::dualshock_4
-          ? fill_ds4_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen)
+          ? fill_ds4_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen, slot->ds4.features)
           : fill_ds5_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen);
       status = written != 0 ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
     }
@@ -1302,6 +1303,21 @@ void evt_vhf_set_feature(
 
   auto *const slot = static_cast<controller_slot *>(vhf_client_context);
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+  if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
+      slot->selected_profile == lvg::profile::dualshock_4) {
+    auto *const context = slot->parent;
+    lock_context(context);
+    if (context->stopping || slot->state != slot_state::active) {
+      status = STATUS_DEVICE_NOT_READY;
+    } else if (lvg::ds4_usb::set_feature(transfer->reportId, transfer->reportBuffer,
+                                       transfer->reportBufferLen, slot->ds4.features)) {
+      status = STATUS_SUCCESS;
+    }
+    unlock_context(context);
+    if (operation_handle != nullptr) VhfAsyncOperationComplete(operation_handle, status);
+    return;
+  }
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
       slot->force_feedback && transfer->reportId == k_pid_create_new_effect_report_id) {

@@ -786,15 +786,15 @@ int main() {
     check(!decode_ds4_output(output, &feedback), "ds4 rejects a foreign report id");
 
     std::uint8_t buffer[64] {};
-    check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, sizeof(buffer)) == 36,
-          "ds4 calibration feature is 36 bytes");
+    check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, sizeof(buffer)) == 37,
+          "ds4 calibration feature is 37 bytes");
     check(buffer[0] == k_ds4_feature_calibration_id, "ds4 calibration carries its report id");
     check(fill_ds4_feature(k_ds4_feature_firmware_id, buffer, sizeof(buffer)) == 49,
           "ds4 firmware feature is 49 bytes");
     check(fill_ds4_feature(k_ds4_feature_pairing_id, buffer, sizeof(buffer)) == 16,
           "ds4 pairing feature is 16 bytes");
     // Locally administered, so it cannot collide with a real Sony address.
-    check((buffer[1] & 0x02) != 0, "ds4 MAC is locally administered");
+    check((buffer[6] & 0x02) != 0, "ds4 MAC is locally administered");
     check(fill_ds4_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds4 ignores unknown features");
     check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, 4) == 0,
           "ds4 refuses a short feature buffer");

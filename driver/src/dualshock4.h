@@ -16,6 +16,7 @@
 #include <cstdint>
 
 #include "libvirtualgamepad/protocol.h"
+#include "libvirtualgamepad/ds4_usb.h"
 
 namespace lvg::driver {
 
@@ -123,6 +124,7 @@ static_assert(offsetof(ds4_output_report, flash_off) == 10);
 // DS4 report carries buttons, motion, touch, and battery together, so each of
 // those arrives on its own IOCTL and is folded into one report here.
 struct ds4_state {
+  lvg::ds4_usb::feature_state features;
   std::uint8_t report_counter;
   std::uint16_t timestamp;
   std::uint8_t touch_timestamp;
@@ -169,7 +171,8 @@ struct ds4_state {
 [[nodiscard]] std::size_t fill_ds4_feature(
   std::uint8_t report_id,
   std::uint8_t *buffer,
-  std::size_t capacity) noexcept;
+  std::size_t capacity,
+  const lvg::ds4_usb::feature_state &state = {}) noexcept;
 
 [[nodiscard]] feedback_event encode_playstation_feedback(
   std::uint32_t controller_id,
