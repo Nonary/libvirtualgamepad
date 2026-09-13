@@ -10,96 +10,6 @@
 namespace lvg::driver {
 namespace {
 
-// A 64-byte input report on ID 1, a 47-byte output report on ID 2, and the
-// vendor feature reports the host-side initialization reads. As with the
-// DualShock 4, the interior of the input report is vendor-defined on real
-// hardware past the sticks, triggers, hat, and buttons.
-constexpr std::uint8_t k_ds5_descriptor[] = {
-  0x05, 0x01,        // Usage Page (Generic Desktop)
-  0x09, 0x05,        // Usage (Game Pad)
-  0xA1, 0x01,        // Collection (Application)
-  0x85, 0x01,        //   Report ID (1)
-  0x09, 0x30,        //   Usage (X)
-  0x09, 0x31,        //   Usage (Y)
-  0x09, 0x32,        //   Usage (Z)
-  0x09, 0x35,        //   Usage (Rz)
-  0x09, 0x33,        //   Usage (Rx)
-  0x09, 0x34,        //   Usage (Ry)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x06,        //   Report Count (6)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x06, 0x00, 0xFF,  //   Usage Page (Vendor-defined 0xFF00)
-  0x09, 0x20,        //   Usage (0x20)
-  0x95, 0x01,        //   Report Count (1)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x05, 0x01,        //   Usage Page (Generic Desktop)
-  0x09, 0x39,        //   Usage (Hat switch)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x07,        //   Logical Maximum (7)
-  0x35, 0x00,        //   Physical Minimum (0)
-  0x46, 0x3B, 0x01,  //   Physical Maximum (315)
-  0x65, 0x14,        //   Unit (English Rotation: Degrees)
-  0x75, 0x04,        //   Report Size (4)
-  0x95, 0x01,        //   Report Count (1)
-  0x81, 0x42,        //   Input (Data, Variable, Absolute, Null state)
-  0x65, 0x00,        //   Unit (None)
-  0x05, 0x09,        //   Usage Page (Button)
-  0x19, 0x01,        //   Usage Minimum (1)
-  0x29, 0x0F,        //   Usage Maximum (15)
-  0x15, 0x00,        //   Logical Minimum (0)
-  0x25, 0x01,        //   Logical Maximum (1)
-  0x75, 0x01,        //   Report Size (1)
-  0x95, 0x0F,        //   Report Count (15)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x06, 0x00, 0xFF,  //   Usage Page (Vendor-defined 0xFF00)
-  0x09, 0x21,        //   Usage (0x21)
-  0x75, 0x01,        //   Report Size (1)
-  0x95, 0x0D,        //   Report Count (13)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x09, 0x22,        //   Usage (0x22)
-  0x75, 0x08,        //   Report Size (8)
-  0x95, 0x34,        //   Report Count (52)
-  0x81, 0x02,        //   Input (Data, Variable, Absolute)
-  0x85, 0x02,        //   Report ID (2)
-  0x09, 0x23,        //   Usage (0x23)
-  0x95, 0x2F,        //   Report Count (47)
-  0x91, 0x02,        //   Output (Data, Variable, Absolute)
-  0x85, 0x05,        //   Report ID (5)
-  0x09, 0x33,        //   Usage (0x33)
-  0x95, 0x28,        //   Report Count (40)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0x85, 0x09,        //   Report ID (9)
-  0x09, 0x34,        //   Usage (0x34)
-  0x95, 0x13,        //   Report Count (19)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0x85, 0x20,        //   Report ID (32)
-  0x09, 0x26,        //   Usage (0x26)
-  0x95, 0x3F,        //   Report Count (63)
-  0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
-  0xC0,              // End Collection
-};
-
-// Identity calibration, for the same reason as the DualShock 4: a fabricated
-// non-identity curve would skew every motion sample a consumer derives.
-constexpr std::uint8_t k_ds5_calibration[41] = {
-  k_ds5_feature_calibration_id,
-  0x00, 0x00,  // gyro pitch bias
-  0x00, 0x00,  // gyro yaw bias
-  0x00, 0x00,  // gyro roll bias
-  0x00, 0x20, 0x00, 0xE0,  // gyro pitch plus / minus
-  0x00, 0x20, 0x00, 0xE0,  // gyro yaw plus / minus
-  0x00, 0x20, 0x00, 0xE0,  // gyro roll plus / minus
-  0x00, 0x20, 0x00, 0x20,  // gyro speed plus / minus
-  0x00, 0x20, 0x00, 0xE0,  // accel x plus / minus
-  0x00, 0x20, 0x00, 0xE0,  // accel y plus / minus
-  0x00, 0x20, 0x00, 0xE0,  // accel z plus / minus
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-constexpr std::uint8_t k_ds5_mac[6] = {0x02, 0x56, 0x47, 0x50, 0x44, 0x53};
-
 [[nodiscard]] std::uint8_t encode_hat(const std::uint32_t buttons) noexcept {
   const bool up = (buttons & button_mask::dpad_up) != 0;
   const bool down = (buttons & button_mask::dpad_down) != 0;
@@ -164,6 +74,7 @@ void pack_touch_point(ds5_touch_point *const point,
 }  // namespace
 
 void ds5_state::reset() noexcept {
+  features = {};
   sequence = 0;
   sensor_timestamp = 0;
   battery_level = 5;
@@ -185,9 +96,9 @@ void ds5_state::reset() noexcept {
 
 const std::uint8_t *ds5_descriptor(std::size_t *const size) noexcept {
   if (size != nullptr) {
-    *size = sizeof(k_ds5_descriptor);
+    *size = lvg::ds5_usb::report_descriptor_size;
   }
-  return k_ds5_descriptor;
+  return lvg::ds5_usb::report_descriptor;
 }
 
 ds5_input_report encode_ds5_input(
@@ -457,47 +368,9 @@ bool apply_ds5_output(
 std::size_t fill_ds5_feature(
   const std::uint8_t report_id,
   std::uint8_t *const buffer,
-  const std::size_t capacity) noexcept {
-  if (buffer == nullptr) {
-    return 0;
-  }
-
-  switch (report_id) {
-    case k_ds5_feature_calibration_id: {
-      if (capacity < sizeof(k_ds5_calibration)) {
-        return 0;
-      }
-      std::memcpy(buffer, k_ds5_calibration, sizeof(k_ds5_calibration));
-      return sizeof(k_ds5_calibration);
-    }
-    case k_ds5_feature_pairing_id: {
-      constexpr std::size_t k_size = 20;
-      if (capacity < k_size) {
-        return 0;
-      }
-      std::memset(buffer, 0, k_size);
-      buffer[0] = k_ds5_feature_pairing_id;
-      std::memcpy(buffer + 1, k_ds5_mac, sizeof(k_ds5_mac));
-      return k_size;
-    }
-    case k_ds5_feature_firmware_id: {
-      constexpr std::size_t k_size = 64;
-      if (capacity < k_size) {
-        return 0;
-      }
-      std::memset(buffer, 0, k_size);
-      buffer[0] = k_ds5_feature_firmware_id;
-      // Version words only; the build-string bytes stay empty rather than
-      // impersonating a specific factory firmware.
-      buffer[24] = 0x00;
-      buffer[25] = 0x01;
-      buffer[28] = 0x00;
-      buffer[29] = 0x01;
-      return k_size;
-    }
-    default:
-      return 0;
-  }
+  const std::size_t capacity,
+  const lvg::ds5_usb::feature_state &state) noexcept {
+  return lvg::ds5_usb::get_feature(report_id, buffer, capacity, state);
 }
 
 }  // namespace lvg::driver

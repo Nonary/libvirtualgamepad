@@ -340,6 +340,7 @@ void destroy_owned_controller(
   slot.ds4.reset();
   slot.ds4.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.ds5.reset();
+  slot.ds5.features.address[0] = static_cast<std::uint8_t>(request.controller_id);
   slot.switch_pro.reset();
   slot.pump.reset();
   unlock_context(context);
@@ -1232,7 +1233,7 @@ void evt_vhf_get_feature(
       const std::size_t written =
         slot->selected_profile == lvg::profile::dualshock_4
           ? fill_ds4_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen, slot->ds4.features)
-          : fill_ds5_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen);
+          : fill_ds5_feature(transfer->reportId, transfer->reportBuffer, transfer->reportBufferLen, slot->ds5.features);
       status = written != 0 ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
     }
     unlock_context(context);
@@ -1305,14 +1306,18 @@ void evt_vhf_set_feature(
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
   if (slot != nullptr && slot->parent != nullptr && transfer != nullptr &&
-      slot->selected_profile == lvg::profile::dualshock_4) {
+      is_playstation(slot->selected_profile)) {
     auto *const context = slot->parent;
     lock_context(context);
     if (context->stopping || slot->state != slot_state::active) {
       status = STATUS_DEVICE_NOT_READY;
-    } else if (lvg::ds4_usb::set_feature(transfer->reportId, transfer->reportBuffer,
-                                       transfer->reportBufferLen, slot->ds4.features)) {
-      status = STATUS_SUCCESS;
+    } else {
+      const bool accepted = slot->selected_profile == lvg::profile::dualshock_4
+        ? lvg::ds4_usb::set_feature(transfer->reportId, transfer->reportBuffer,
+                                  transfer->reportBufferLen, slot->ds4.features)
+        : lvg::ds5_usb::set_feature(transfer->reportId, transfer->reportBuffer,
+                                  transfer->reportBufferLen, slot->ds5.features);
+      status = accepted ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
     }
     unlock_context(context);
     if (operation_handle != nullptr) VhfAsyncOperationComplete(operation_handle, status);

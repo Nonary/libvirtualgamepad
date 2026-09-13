@@ -849,6 +849,24 @@ int main() {
     check(fill_ds5_feature(k_ds5_feature_pairing_id, buffer, sizeof(buffer)) == 20,
           "ds5 pairing feature is 20 bytes");
     check(fill_ds5_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds5 ignores unknown features");
+
+    ds5_state calibrated_state {};
+    calibrated_state.reset();
+    motion_state_request motion {};
+    motion.motion_type = static_cast<std::uint8_t>(motion_kind::gyroscope);
+    motion.x_milli = 1000;
+    check(apply_ds5_motion(motion, &calibrated_state), "ds5 calibration accepts a one-degree/s sample");
+    const auto sample = encode_ds5_input(input, &calibrated_state);
+    check(fill_ds5_feature(k_ds5_feature_calibration_id, buffer, sizeof(buffer)) == 41,
+          "ds5 motion calibration reply is available");
+    const auto signed_le16 = [](const std::uint8_t *p) {
+      return static_cast<std::int16_t>(p[0] | (p[1] << 8));
+    };
+    const int speed = signed_le16(buffer + 19) + signed_le16(buffer + 21);
+    const int range = signed_le16(buffer + 7) - signed_le16(buffer + 9);
+    check(range > 0 && sample.gyro[0] * speed == range,
+          "ds5 emitted gyro sample calibrates back to one degree/s");
+
   }
 
   {
