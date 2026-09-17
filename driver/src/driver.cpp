@@ -1107,11 +1107,9 @@ void evt_vhf_write_report(
         decoded = decode_ds4_output(output, &feedback);
       }
     } else {
-      ds5_output_report output {};
-      if (transfer->reportBuffer != nullptr &&
-          transfer->reportBufferLen >= sizeof(output)) {
-        std::memcpy(&output, transfer->reportBuffer, sizeof(output));
-        decoded = decode_ds5_output(output, &feedback);
+      if (transfer->reportBuffer != nullptr) {
+        decoded = decode_ds5_output(transfer->reportBuffer, transfer->reportBufferLen,
+                                    &feedback);
       }
     }
 

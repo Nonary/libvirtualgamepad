@@ -24,6 +24,7 @@ namespace lvg::driver {
 
 inline constexpr std::uint8_t k_ds5_input_report_id = 0x01;
 inline constexpr std::uint8_t k_ds5_output_report_id = 0x02;
+inline constexpr std::uint8_t k_ds5_output_report_id_bt = 0x31;
 inline constexpr std::uint8_t k_ds5_feature_calibration_id = 0x05;
 inline constexpr std::uint8_t k_ds5_feature_pairing_id = 0x09;
 inline constexpr std::uint8_t k_ds5_feature_firmware_id = 0x20;
@@ -46,6 +47,11 @@ inline constexpr std::uint8_t k_ds5_flag1_power_save = 0x02;
 inline constexpr std::uint8_t k_ds5_flag1_lightbar = 0x04;
 inline constexpr std::uint8_t k_ds5_flag1_release_leds = 0x08;
 inline constexpr std::uint8_t k_ds5_flag1_player_indicator = 0x10;
+// valid_flag2 bit 2: improved rumble (libScePad EnableImprovedRumbleEmulation,
+// hid-playstation COMPATIBLE_VIBRATION2). DualSense firmware >= 0x0220 uses
+// this instead of valid_flag0 bit 0, and libScePad does the same once
+// FirmwareVersion >= 0x220.
+inline constexpr std::uint8_t k_ds5_flag2_compatible_vibration2 = 0x04;
 
 #pragma pack(push, 1)
 
@@ -165,6 +171,15 @@ struct ds5_state {
 
 [[nodiscard]] bool decode_ds5_output(
   const ds5_output_report &output,
+  playstation_output_feedback *feedback) noexcept;
+
+// USB report 0x02 is 48 bytes. Bluetooth report 0x31 is 78 bytes with a
+// 3-byte header (id, seq, tag 0x10) then the same 47-byte common payload.
+// libScePad picks 0x31 when HIDP_CAPS.OutputReportByteLength is greater
+// than the USB size (48 for DualSense, 64 for DualSense Edge).
+[[nodiscard]] bool decode_ds5_output(
+  const std::uint8_t *data,
+  std::size_t size,
   playstation_output_feedback *feedback) noexcept;
 
 [[nodiscard]] std::size_t fill_ds5_feature(

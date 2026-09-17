@@ -305,53 +305,85 @@ bool apply_ds5_battery(const battery_state_request &battery, ds5_state *const st
 }
 
 bool decode_ds5_output(
-  const ds5_output_report &output,
+  const std::uint8_t *const data,
+  const std::size_t size,
   playstation_output_feedback *const feedback) noexcept {
-  if (feedback == nullptr || output.report_id != k_ds5_output_report_id) {
+  if (feedback == nullptr || data == nullptr || size == 0) {
+    return false;
+  }
+
+  const std::uint8_t *common = nullptr;
+  std::size_t common_size = 0;
+  if (data[0] == k_ds5_output_report_id) {
+    if (size < sizeof(ds5_output_report)) {
+      return false;
+    }
+    common = data + 1;
+    common_size = size - 1;
+  } else if (data[0] == k_ds5_output_report_id_bt) {
+    // id, seq, tag (0x10), then the USB common payload.
+    if (size < 3 + (sizeof(ds5_output_report) - 1)) {
+      return false;
+    }
+    common = data + 3;
+    common_size = size - 3;
+  } else {
     return false;
   }
 
   *feedback = {};
 
-  if (output.valid_flag0 & k_ds5_flag0_compatible_vibration) {
-    feedback->low_frequency = static_cast<std::uint16_t>(output.motor_left << 8);
-    feedback->high_frequency = static_cast<std::uint16_t>(output.motor_right << 8);
+  const std::uint8_t flag0 = common[0];
+  const std::uint8_t flag1 = common[1];
+  const std::uint8_t flag2 = common_size > 38 ? common[38] : 0;
+
+  if ((flag0 & k_ds5_flag0_compatible_vibration) != 0 ||
+      (flag2 & k_ds5_flag2_compatible_vibration2) != 0) {
+    feedback->low_frequency = static_cast<std::uint16_t>(common[3] << 8);
+    feedback->high_frequency = static_cast<std::uint16_t>(common[2] << 8);
   }
 
-  if (output.valid_flag1 & k_ds5_flag1_lightbar) {
-    feedback->red = output.lightbar_red;
-    feedback->green = output.lightbar_green;
-    feedback->blue = output.lightbar_blue;
+  if (flag1 & k_ds5_flag1_lightbar) {
+    feedback->red = common[44];
+    feedback->green = common[45];
+    feedback->blue = common[46];
     feedback->valid |= ps_output_lightbar_valid;
   }
 
-  if (output.valid_flag1 & k_ds5_flag1_player_indicator) {
-    feedback->player_leds = output.player_leds;
+  if (flag1 & k_ds5_flag1_player_indicator) {
+    feedback->player_leds = common[43];
     feedback->valid |= ps_output_player_leds_valid;
   }
 
-  if (output.valid_flag1 & k_ds5_flag1_mic_mute_led) {
-    feedback->microphone_led = output.mute_button_led;
+  if (flag1 & k_ds5_flag1_mic_mute_led) {
+    feedback->microphone_led = common[8];
     feedback->valid |= ps_output_microphone_led_valid;
   }
 
   // Each trigger is programmed independently, and a report may carry one
   // without the other. Anything not enabled stays at mode 0 (off) rather than
   // repeating the last program, which would keep a released effect alive.
-  if (output.valid_flag0 & k_ds5_flag0_left_trigger_effect) {
-    feedback->left_trigger.mode = output.left_trigger.mode;
-    std::memcpy(feedback->left_trigger.parameters, output.left_trigger.parameters,
+  if (flag0 & k_ds5_flag0_left_trigger_effect) {
+    feedback->left_trigger.mode = common[21];
+    std::memcpy(feedback->left_trigger.parameters, common + 22,
                 sizeof(feedback->left_trigger.parameters));
     feedback->valid |= ps_output_triggers_valid;
   }
-  if (output.valid_flag0 & k_ds5_flag0_right_trigger_effect) {
-    feedback->right_trigger.mode = output.right_trigger.mode;
-    std::memcpy(feedback->right_trigger.parameters, output.right_trigger.parameters,
+  if (flag0 & k_ds5_flag0_right_trigger_effect) {
+    feedback->right_trigger.mode = common[10];
+    std::memcpy(feedback->right_trigger.parameters, common + 11,
                 sizeof(feedback->right_trigger.parameters));
     feedback->valid |= ps_output_triggers_valid;
   }
 
   return true;
+}
+
+bool decode_ds5_output(
+  const ds5_output_report &output,
+  playstation_output_feedback *const feedback) noexcept {
+  return decode_ds5_output(reinterpret_cast<const std::uint8_t *>(&output),
+                           sizeof(output), feedback);
 }
 
 std::size_t fill_ds5_feature(

@@ -846,6 +846,8 @@ int main() {
           "ds5 calibration feature is 41 bytes");
     check(fill_ds5_feature(k_ds5_feature_firmware_id, buffer, sizeof(buffer)) == 64,
           "ds5 firmware feature is 64 bytes");
+    check((buffer[44] | (buffer[45] << 8)) >= 0x0390,
+          "ds5 firmware reports the libScePad update version");
     check(fill_ds5_feature(k_ds5_feature_pairing_id, buffer, sizeof(buffer)) == 20,
           "ds5 pairing feature is 20 bytes");
     check(fill_ds5_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds5 ignores unknown features");
@@ -1352,12 +1354,38 @@ int main() {
     check(quiet_fb.left_trigger.mode == 0 && quiet_fb.right_trigger.mode == 0,
           "trigger effects reset rather than repeat");
 
-    // A foreign report id must be refused rather than parsed as ours.
+    // libScePad uses valid_flag2 bit 2 (improved rumble) once FirmwareVersion
+    // is >= 0x220, leaving valid_flag0 bit 0 clear.
+    std::uint8_t rumble_v2[48] {};
+    rumble_v2[0] = 0x02;
+    rumble_v2[3] = 0x40;
+    rumble_v2[4] = 0x80;
+    rumble_v2[39] = 0x04;
+    ds5_output_report v2 {};
+    std::memcpy(&v2, rumble_v2, sizeof(v2));
+    playstation_output_feedback v2_fb {};
+    check(decode_ds5_output(v2, &v2_fb), "improved-rumble output decodes");
+    check(v2_fb.low_frequency == 0x8000 && v2_fb.high_frequency == 0x4000,
+          "improved rumble still maps left to low frequency");
+
+    // libScePad writes report 0x31 when HID advertises a Bluetooth-sized
+    // output. The common payload starts after id/seq/tag.
+    std::uint8_t bt[78] {};
+    bt[0] = 0x31;
+    bt[2] = 0x10;
+    std::memcpy(bt + 3, raw + 1, 47);
+    playstation_output_feedback bt_fb {};
+    check(decode_ds5_output(bt, sizeof(bt), &bt_fb), "a DualSense Bluetooth output report decodes");
+    check(bt_fb.low_frequency == 0x8000 && bt_fb.high_frequency == 0x4000,
+          "Bluetooth rumble uses the same common payload");
+    check(bt_fb.right_trigger.mode == 0x26 && bt_fb.left_trigger.mode == 0x21,
+          "Bluetooth trigger effects survive the 3-byte header");
+
     ds5_output_report wrong {};
     std::memcpy(&wrong, raw, sizeof(wrong));
-    wrong.report_id = 0x31;
+    wrong.report_id = 0x05;
     playstation_output_feedback ignored {};
-    check(!decode_ds5_output(wrong, &ignored), "a foreign report id is refused");
+    check(!decode_ds5_output(wrong, &ignored), "a DualShock 4 report id is refused");
   }
 
   {

@@ -1,7 +1,10 @@
 # DualSense USB compatibility
 
 The Windows VHF profile uses our portable `ds5_usb.h` contract. It has no
-ViGEm dependency. Linux remains outside this change.
+ViGEm dependency. Linux UHID DualSense uses the same firmware UpdateVersion,
+USB descriptor, and sensor-enable command via Inputtino's `ds5_usb.hpp`. HD
+haptics still need a DualSense USB audio function, which neither VHF nor UHID
+provides.
 
 Resonance: A Plague Tale Legacy identifies Sony 054c:0ce6, then classifies the
 transport and initializes native scePad input. Matching VID/PID and sending
@@ -14,6 +17,9 @@ readable button reports does not satisfy that sequence.
 | Transport classification | Feature 85, page FF00, usage 2D, count 2 | Missing; classified as Bluetooth or skipped |
 | Firmware descriptor | Feature 20, page FF00, usage 26, count 63 | Already correct |
 | Firmware/calibration agreement | LE32 at offset 28 >= 0001003E selects calibration usage 33 | 00000100 selected legacy usage 23, absent from our descriptor |
+| Firmware UpdateVersion | LE16 at offset 44 >= 0390 | 0000 made libScePad report a required DualSense firmware update and skip triggers/rumble |
+| Improved rumble | Output valid_flag2 bit 2 (COMPATIBLE_VIBRATION2) | Only valid_flag0 bit 0 was decoded, so libScePad rumble v2 was ignored |
+| Bluetooth output | Report 0x31, 78 bytes, common payload at offset 3 | USB-only 0x02 decode; libScePad sends 0x31 when OutputReportByteLength > 48 |
 | Calibration descriptor | Feature 05, page FF00, usage 33, count 40 | Correct for the modern USB revision |
 | Sensor initialization | SetFeature 08, 48 bytes, command byte 02, reserved bytes zero | Descriptor omitted and command rejected |
 | Input / output / maximum feature sizes | 64 / 48 / 64 bytes including report ID | Already correct |
@@ -71,6 +77,22 @@ scePad slots before the update. While our temporary neutral DualSense was held
 open after the update, the game registered 054c:0ce6 and parsed firmware 0001003E
 into its native controller record. This verifies native recognition; manual
 gameplay and feedback behavior remain separate from that observation.
+
+007 First Light ships Sony `libScePad.dll` (Retail/libscepad.dll,
+SHA-256 `C27452712DF85B04BB4043EE61BADCC34036FD1A389F9FECB2885BA1EBC134A3`,
+PDB `C:\PSDEV\pad_win\src\x64\Release\libScePad.pdb`). That library:
+
+- Enumerates HID by VID 054C and PID 0CE6 / 0DF2 / 0E5F (Access is treated as DualSense).
+- Classifies USB vs Bluetooth from `HIDP_CAPS.OutputReportByteLength` (USB if
+  <= 48 for DualSense, <= 64 for DualSense Edge).
+- Reads feature 0x20 and requires UpdateVersion at offset 44 >= 0x0390
+  (`scePadIsControllerUpdateRequired`).
+- Writes output with `WriteFile` (interrupt), never `HidD_SetOutputReport`.
+  USB uses report 0x02; Bluetooth uses 0x31 with tag 0x10 and a CRC32.
+- Enables improved rumble (`valid_flag2` bit 2) when FirmwareVersion >= 0x220.
+- Returns audio-supported for those PIDs on USB. HD haptics still need the
+  DualSense USB audio function, which VHF cannot provide; adaptive triggers
+  and classic/v2 rumble go through the HID output report.
 
 Protocol references:
 - [Captured DualSense USB descriptor](https://github.com/nondebug/dualsense/blob/main/report-descriptor-usb.txt)
