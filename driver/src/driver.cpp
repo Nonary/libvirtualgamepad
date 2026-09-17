@@ -1111,11 +1111,20 @@ void evt_vhf_write_report(
         std::memcpy(&output, transfer->reportBuffer, sizeof(output));
         decoded = apply_ds4_output(output, &feedback);
       }
-    } else {
+    } else if (transfer->reportBuffer != nullptr && transfer->reportBufferLen > 0) {
       ds5_output_report output {};
-      if (transfer->reportBuffer != nullptr &&
-          transfer->reportBufferLen >= sizeof(output)) {
-        std::memcpy(&output, transfer->reportBuffer, sizeof(output));
+      const auto *const data = transfer->reportBuffer;
+      const auto length = transfer->reportBufferLen;
+      if (data[0] == k_ds5_output_report_id && length >= sizeof(output)) {
+        std::memcpy(&output, data, sizeof(output));
+        decoded = apply_ds5_output(output, &feedback);
+      } else if (data[0] == k_ds5_output_report_id_bt &&
+                 length >= 3 + sizeof(output) - 1) {
+        // libScePad writes report 0x31 when HID advertises a Bluetooth-sized
+        // output. The common payload starts after id, seq, and tag 0x10.
+        output.report_id = k_ds5_output_report_id;
+        std::memcpy(reinterpret_cast<std::uint8_t *>(&output) + 1, data + 3,
+                    sizeof(output) - 1);
         decoded = apply_ds5_output(output, &feedback);
       }
     }

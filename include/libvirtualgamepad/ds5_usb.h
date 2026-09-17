@@ -47,12 +47,19 @@ inline constexpr std::array<std::uint8_t, 41> calibration = {
 // Native hosts select calibration usage 33 for the USB protocol introduced at
 // firmware 0x0001003e. An older revision selects usage 23 instead. This is a
 // protocol compatibility revision, not our package version or a factory build.
+//
+// Offset 44 is the 16-bit UpdateVersion libScePad reads. 007 First Light's
+// libScePad.dll returns SCE_PAD_UPDATE_REQUIRED when this is below 0x0390
+// and skips adaptive triggers and vibration.
+inline constexpr std::uint16_t update_version = 0x0390;
 inline constexpr std::array<std::uint8_t, 64> firmware = [] {
   std::array<std::uint8_t, 64> value {};
   value[0] = firmware_id;
   value[25] = 1; // Hardware version, retained from our original profile.
   value[28] = 0x3e;
   value[30] = 1;
+  value[44] = static_cast<std::uint8_t>(update_version);
+  value[45] = static_cast<std::uint8_t>(update_version >> 8);
   return value;
 }();
 struct feature_state {

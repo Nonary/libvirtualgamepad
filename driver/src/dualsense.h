@@ -24,6 +24,7 @@ namespace lvg::driver {
 
 inline constexpr std::uint8_t k_ds5_input_report_id = 0x01;
 inline constexpr std::uint8_t k_ds5_output_report_id = 0x02;
+inline constexpr std::uint8_t k_ds5_output_report_id_bt = 0x31;
 inline constexpr std::uint8_t k_ds5_feature_calibration_id = 0x05;
 inline constexpr std::uint8_t k_ds5_feature_pairing_id = 0x09;
 inline constexpr std::uint8_t k_ds5_feature_firmware_id = 0x20;
