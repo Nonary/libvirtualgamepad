@@ -29,9 +29,14 @@ The corrected descriptor exposes the complete USB feature inventory and restores
 logical maximum 255 after the button fields. We implement the native sensor-enable
 command precisely; unsupported factory/authentication operations still fail.
 Firmware fields describe our supported protocol revision, not a claimed factory
-build or driver-package version. Build strings and optional feature version stay
-empty. Native transport classification depends on the descriptor for report 85;
-it does not require a fabricated response to that factory operation.
+build or driver-package version. The report still uses the hardware
+`ReportFeatureInVersion` layout libScePad overlays: a printable build date/time,
+nonzero `FwType`, `HardwareInfo`, and a 1.x `FirmwareVersion` (LE32 at offset 28
+`0x0100003e`) so Sony's PC library does not treat the device as uninitialized.
+Native transport classification depends on the descriptor for report 85; it does
+not require a fabricated response to that factory operation. Pairing report 0x09
+includes the hardware `08 25 00` bytes after the client MAC; libScePad reads
+those as part of `ReportFeatureInMacAll`.
 
 The calibration report is 41 bytes with zero biases and interleaved gyro endpoints.
 Gyro speed calibration is +/-512 degrees/s for +/-8192 counts, matching the
@@ -81,3 +86,4 @@ gameplay and feedback behavior remain separate from that observation.
 Protocol references:
 - [Captured DualSense USB descriptor](https://github.com/nondebug/dualsense/blob/main/report-descriptor-usb.txt)
 - [Linux hid-playstation calibration and firmware parser](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-playstation.c)
+- Dying Light The Beast `libScePad.dll` 1.0.4.1 (SHA-256 `73d21bda527e53860b58c57de4a511507efaad4ddf3b4957ece4e49bc0791f84`) is DS4-only (VID 054C, PID 05C4/09CC). DualSense support lives in later Sony PC libraries; Resonance's statically linked scePad and duaLib's Stellar Blade-based `ReportFeatureInVersion` / `ReportFeatureInMacAll` overlays are the DualSense contract.

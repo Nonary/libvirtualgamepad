@@ -81,6 +81,10 @@ int main() {
     std::array<unsigned char, 49> firmware {}; firmware[0] = 0xa3;
     check(HidD_GetFeature(handle, firmware.data(), static_cast<ULONG>(firmware.size())) &&
           (firmware[35] | (firmware[36] << 8)) >= 0x3100, "native USB DS4 firmware gate");
+    std::array<unsigned char, 16> pairing {}; pairing[0] = 0x12;
+    check(HidD_GetFeature(handle, pairing.data(), static_cast<ULONG>(pairing.size())) &&
+          pairing[7] == 0x08 && pairing[8] == 0x25 && pairing[9] == 0x00,
+          "libScePad DS4 pairing magic");
     std::array<unsigned char, 17> command {}; command[0] = 0x14; command[1] = 2;
     check(HidD_SetFeature(handle, command.data(), static_cast<ULONG>(command.size())), "native USB sensor initialization");
     std::array<unsigned char, 37> calibration {}; calibration[0] = 2;

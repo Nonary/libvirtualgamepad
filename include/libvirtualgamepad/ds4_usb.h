@@ -79,6 +79,17 @@ struct feature_state {
   bool sensors_enabled = true;
 };
 
+// libScePad overlays ReportFeatureInMacAll: client MAC, then 0x08 0x25 0x00,
+// then host MAC. Dying Light's libScePad 1.0.4.1 only reverses the MAC, but
+// later Sony PC libraries read those three bytes as part of the struct.
+inline void fill_pairing(std::uint8_t *buffer, const std::array<std::uint8_t, 6> &address) noexcept {
+  buffer[0] = pairing_id;
+  std::memcpy(buffer + 1, address.data(), address.size());
+  buffer[7] = 0x08;
+  buffer[8] = 0x25;
+  buffer[9] = 0x00;
+}
+
 // Return the actual wire length, not the caller's maximum HID feature size.
 // Clear any successful response's tail: VHF may reuse a larger report buffer.
 inline std::size_t get_feature(std::uint8_t id, std::uint8_t *buffer,
@@ -97,7 +108,7 @@ inline std::size_t get_feature(std::uint8_t id, std::uint8_t *buffer,
   switch (id) {
     case calibration_id: std::memcpy(buffer, calibration.data(), length); break;
     case firmware_id: std::memcpy(buffer, firmware.data(), length); break;
-    case pairing_id: std::memcpy(buffer + 1, state.address.data(), state.address.size()); break;
+    case pairing_id: fill_pairing(buffer, state.address); break;
     case control_id: buffer[1] = state.sensors_enabled ? 0x02 : 0; break;
   }
   return length;

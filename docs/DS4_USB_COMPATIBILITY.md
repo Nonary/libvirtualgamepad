@@ -30,7 +30,10 @@ zero bias, 16 gyro counts per degree/second, and 8192 accelerometer counts per g
 The USB calibration endpoints interleave positive/negative values by axis.
 Build date/time fields are empty because this is not a factory controller.
 Pairing addresses are locally administered, stable, and distinct per slot;
-native libraries deduplicate devices by this address.
+native libraries deduplicate devices by this address. The pairing report also
+carries the hardware `08 25 00` bytes after the client MAC. Dying Light's
+libScePad 1.0.4.1 only reverses the six MAC octets, but later Sony PC libraries
+overlay `ReportFeatureInMacAll` on the same 16-byte USB reply.
 
 Successful feature reads clear the caller's remaining capacity. VHF can reuse a
 report buffer, so copying only the short feature payload leaves stale bytes in
@@ -68,3 +71,12 @@ Native gates were recovered from Requiem executable SHA-256
 `4A0D3D39EFB5BA880183B595EEF1EDB496E0CDAAA8ACFCE67A0CE01065375D6D`:
 RVA 160823D (minimum 53-byte feature capacity), 1606820 (USB feature identity),
 16083AD (firmware protocol revision), and 1605870 (sensor initialization).
+
+Dying Light The Beast ships `libScePad.dll` 1.0.4.1 (SHA-256
+`73d21bda527e53860b58c57de4a511507efaad4ddf3b4957ece4e49bc0791f84`).
+That build accepts VID 054C with PID 05C4 or 09CC, requires
+`FeatureReportByteLength >= 16` and USB input/feature sizes 64/53, reads
+pairing report 0x12 at 16 bytes and reverses the MAC, reads firmware 0xA3 at
+49 bytes and requires the LE16 at offset 0x23 `>= 0x3100`, then enables
+sensors with SetFeature 0x14 command 02. It rejects a Bluetooth-style feature
+0x06 (page FF04, usage 0x27, count 0x34).

@@ -72,6 +72,16 @@ int main() {
   }
   get_feature(0xa3, buffer.data(), buffer.size(), state);
   check((buffer[35] | (buffer[36] << 8)) >= 0x3100, "native USB firmware revision accepted");
+  // libScePad 1.0.4.1 (Dying Light) reads the protocol word as LE16 at offset
+  // 0x23, then requires >= 0x3100 before it will consume input reports.
+  check(((buffer[0x24] << 8) | buffer[0x23]) >= 0x3100, "libScePad DS4 firmware protocol word");
+  get_feature(0x12, buffer.data(), buffer.size(), state);
+  check(buffer[7] == 0x08 && buffer[8] == 0x25 && buffer[9] == 0x00,
+        "libScePad DS4 pairing magic 08 25 00");
+  std::array<std::uint8_t, 6> reversed {};
+  for (int i = 0; i < 6; ++i) reversed[i] = buffer[6 - i];
+  check(reversed[5] == state.address[0] && (reversed[0] & 3) == 2,
+        "libScePad reverses the pairing MAC from wire order");
   check(get_feature(0x7c, buffer.data(), buffer.size(), state) == 0, "unknown features are not fabricated");
   check(get_feature(2, nullptr, 64, state) == 0, "null feature destination rejected");
 

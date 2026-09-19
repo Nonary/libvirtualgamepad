@@ -76,6 +76,10 @@ int main() {
   get_feature(0x20, buffer.data(), buffer.size(), state);
   check((buffer[28] | (buffer[29] << 8) | (buffer[30] << 16) | (buffer[31] << 24)) >= 0x1003e, "native USB firmware revision accepted");
   check((buffer[44] | (buffer[45] << 8)) >= 0x0390, "libScePad DualSense update version accepted");
+  check(buffer[1] == 'J' && buffer[12] == '1' && buffer[20] != 0,
+        "libScePad DualSense firmware has build date and nonzero FwType");
+  check((buffer[30] | (buffer[31] << 8)) >= 0x0100,
+        "libScePad DualSense firmware major version is 1.x like hardware");
   check(get_feature(0x7c, buffer.data(), buffer.size(), state) == 0, "unknown features are not fabricated");
   check(get_feature(5, nullptr, 64, state) == 0, "null feature destination rejected");
 
@@ -97,6 +101,8 @@ int main() {
     state.address[0] = static_cast<std::uint8_t>(slot);
     get_feature(9, buffer.data(), buffer.size(), state);
     check(buffer[1] == slot && (buffer[6] & 3) == 2, "distinct locally administered unicast pairing address");
+    check(buffer[7] == 0x08 && buffer[8] == 0x25 && buffer[9] == 0x00,
+          "libScePad DualSense pairing magic 08 25 00");
   }
 
   // Kernel/SDL calibration calculations must reproduce the emitted units.

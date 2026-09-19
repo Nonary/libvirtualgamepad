@@ -795,6 +795,8 @@ int main() {
           "ds4 pairing feature is 16 bytes");
     // Locally administered, so it cannot collide with a real Sony address.
     check((buffer[6] & 0x02) != 0, "ds4 MAC is locally administered");
+    check(buffer[7] == 0x08 && buffer[8] == 0x25 && buffer[9] == 0x00,
+          "ds4 pairing carries libScePad MAC-report magic");
     check(fill_ds4_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds4 ignores unknown features");
     check(fill_ds4_feature(k_ds4_feature_calibration_id, buffer, 4) == 0,
           "ds4 refuses a short feature buffer");
@@ -848,6 +850,8 @@ int main() {
           "ds5 firmware feature is 64 bytes");
     check(fill_ds5_feature(k_ds5_feature_pairing_id, buffer, sizeof(buffer)) == 20,
           "ds5 pairing feature is 20 bytes");
+    check(buffer[7] == 0x08 && buffer[8] == 0x25 && buffer[9] == 0x00,
+          "ds5 pairing carries libScePad MAC-report magic");
     check(fill_ds5_feature(0x7C, buffer, sizeof(buffer)) == 0, "ds5 ignores unknown features");
 
     ds5_state calibrated_state {};

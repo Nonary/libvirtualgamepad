@@ -44,30 +44,44 @@ inline constexpr std::array<std::uint8_t, 41> calibration = {
   0, 0, 0, 0, 0, 0
 };
 
-// Native hosts select calibration usage 33 for the USB protocol introduced at
-// firmware 0x0001003e. An older revision selects usage 23 instead. This is a
-// protocol compatibility revision, not our package version or a factory build.
-//
-// Offset 44 is the 16-bit UpdateVersion libScePad reads. 007 First Light's
-// libScePad.dll returns SCE_PAD_UPDATE_REQUIRED when this is below 0x0390
-// and skips adaptive triggers and vibration.
-inline constexpr std::uint16_t update_version = 0x0390;
-inline constexpr std::array<std::uint8_t, 64> firmware = [] {
-  std::array<std::uint8_t, 64> value {};
-  value[0] = firmware_id;
-  value[25] = 1; // Hardware version, retained from our original profile.
-  value[28] = 0x3e;
-  value[30] = 1;
-  value[44] = static_cast<std::uint8_t>(update_version);
-  value[45] = static_cast<std::uint8_t>(update_version >> 8);
-  return value;
-}();
+// Report 0x20 as libScePad overlays ReportFeatureInVersion: build date/time,
+// FwType, SwSeries, HardwareInfo, FirmwareVersion (LE32 at offset 28). Native
+// hosts select calibration usage 33 when that word is >= 0x0001003e. A zeroed
+// FwType/date looks uninitialized to Sony's PC library even when the version
+// word is high enough. Layout matches a captured USB DualSense (and our UHID
+// dump); FirmwareVersion stays 0x0100003e so both the 0x0001003e gate and the
+// 0xAABBCCCC major-version encoding of real hardware are satisfied.
+inline constexpr std::array<std::uint8_t, 64> firmware = {
+  firmware_id,
+  'J', 'u', 'n', ' ', '1', '9', ' ', '2', '0', '2', '3',
+  '1', '4', ':', '4', '7', ':', '3', '4',
+  0x03, 0x00, 0x44, 0x00, 0x08, 0x02, 0x00, 0x01,
+  0x3e, 0x00, 0x00, 0x01,
+  0xC1, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x90, 0x03, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+  0x0B, 0x00, 0x01, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+static_assert(firmware.size() == 64);
+static_assert(firmware[20] != 0 && firmware[31] == 0x01);
+// libScePad checks UpdateVersion separately from FirmwareVersion. Older
+// captured firmware (0x0154 here) requests an update in 007 First Light.
+static_assert((firmware[44] | (firmware[45] << 8)) >= 0x0390);
 struct feature_state {
   // Least-significant wire octet first, unique per controller slot. The final
   // octet has the locally administered bit and no multicast bit.
   std::array<std::uint8_t, 6> address {0, 0x53, 0x50, 0x47, 0x56, 0x02};
   bool sensors_enabled = true;
 };
+// libScePad overlays ReportFeatureInMacAll: client MAC, then 0x08 0x25 0x00,
+// then host MAC. Real hardware always returns those three bytes; leaving them
+// zero is what a sparse pairing reply looks like to Sony's PC library.
+inline void fill_pairing(std::uint8_t *buffer, const std::array<std::uint8_t, 6> &address) noexcept {
+  buffer[0] = pairing_id;
+  std::memcpy(buffer + 1, address.data(), address.size());
+  buffer[7] = 0x08;
+  buffer[8] = 0x25;
+  buffer[9] = 0x00;
+}
 inline std::size_t get_feature(std::uint8_t id, std::uint8_t *buffer,
                                std::size_t capacity, const feature_state &state) noexcept {
   std::size_t length = 0;
@@ -82,10 +96,7 @@ inline std::size_t get_feature(std::uint8_t id, std::uint8_t *buffer,
   switch (id) {
     case calibration_id: std::memcpy(buffer, calibration.data(), length); break;
     case firmware_id: std::memcpy(buffer, firmware.data(), length); break;
-    case pairing_id:
-      buffer[0] = id;
-      std::memcpy(buffer + 1, state.address.data(), state.address.size());
-      break;
+    case pairing_id: fill_pairing(buffer, state.address); break;
   }
   return length;
 }
