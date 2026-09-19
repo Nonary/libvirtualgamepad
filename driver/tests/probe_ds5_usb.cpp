@@ -130,7 +130,9 @@ int main() {
     check(range > 0 && 16 * speed == range, "gyro calibration matches 16 counts per degree/s");
     std::array<unsigned char, 64> identity {}; identity.fill(0xcd); identity[0] = 9;
     check(HidD_GetFeature(handle, identity.data(), static_cast<ULONG>(identity.size())) &&
-          identity[1] == slot && identity[2] == 0x53 && identity[6] == 2, "unique slot pairing address");
+          identity[1] == slot && identity[2] == 0x53 && identity[6] == 2 &&
+          identity[7] == 0x08 && identity[8] == 0x25 && identity[9] == 0x00,
+          "unique slot pairing address");
     bool clean_tail = true;
     for (unsigned i = 20; i < identity.size(); ++i) clean_tail &= identity[i] == 0;
     check(clean_tail, "pairing reply clears reused feature buffer tail");
