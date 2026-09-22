@@ -563,7 +563,8 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 // The caller owns the lifetime gate and must not hold state_lock.
 [[nodiscard]] NTSTATUS submit_playstation_report(
   device_context *const context,
-  controller_slot &slot) noexcept {
+  controller_slot &slot,
+  const lvg::driver::report_kind kind) noexcept {
   using namespace lvg::driver;
 
   lock_context(context);
@@ -598,10 +599,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   }
   unlock_context(context);
 
-  // Rebuilt from state a touch, motion or battery event changed, so the
-  // discrete part is unchanged and only the newest one matters.
-  return pump_report(context, slot, data, length, report_id,
-                     lvg::driver::report_kind::continuous);
+  return pump_report(context, slot, data, length, report_id, kind);
 }
 
 // Resends the current state for whichever profile owns the slot. Touch, motion
@@ -609,9 +607,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 // input report, so each has to rebuild and resend it.
 [[nodiscard]] NTSTATUS submit_profile_report(
   device_context *const context,
-  controller_slot &slot) noexcept {
+  controller_slot &slot,
+  const lvg::driver::report_kind kind = lvg::driver::report_kind::continuous) noexcept {
   if (slot.selected_profile != lvg::profile::switch_pro) {
-    return submit_playstation_report(context, slot);
+    return submit_playstation_report(context, slot, kind);
   }
 
   lock_context(context);
@@ -630,7 +629,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
 
   return pump_report(context, slot, &report, sizeof(report),
                      lvg::driver::k_switch_input_report_id,
-                     lvg::driver::report_kind::continuous);
+                     kind);
 }
 
 // Shared preamble for the touch, motion, and battery IOCTLs: validate the
@@ -691,7 +690,11 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return STATUS_INVALID_PARAMETER;
   }
 
-  status = submit_profile_report(context, *slot);
+  const auto touch_event = static_cast<lvg::touch_event>(request.event_type);
+  const auto kind = touch_event == lvg::touch_event::move || touch_event == lvg::touch_event::hover
+                      ? lvg::driver::report_kind::continuous
+                      : lvg::driver::report_kind::transition;
+  status = submit_profile_report(context, *slot, kind);
   unlock_lifetime(context);
   return status;
 }

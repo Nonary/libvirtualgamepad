@@ -1226,6 +1226,28 @@ int main() {
   }
 
   {
+    // A continuous snapshot predating a transition must never be replayed
+    // afterwards, or it can restore the button state the transition changed.
+    report_pump pump;
+    pump.reset();
+    report_buffer out {};
+    const std::uint8_t press[2] = {0xA1, 0};
+    const std::uint8_t moving_while_pressed[2] = {0xB1, 0};
+    const std::uint8_t release[2] = {0xA0, 0};
+
+    check(pump.enqueue(press, sizeof(press), 1, report_kind::transition), "press queued");
+    check(pump.take(&out) && out.data[0] == 0xA1, "press sent");
+    check(pump.enqueue(moving_while_pressed, sizeof(moving_while_pressed), 1,
+                       report_kind::continuous),
+          "movement while pressed queued");
+    check(pump.enqueue(release, sizeof(release), 1, report_kind::transition), "release queued");
+    pump.set_ready();
+    check(pump.take(&out) && out.data[0] == 0xA0, "release supersedes older movement");
+    pump.set_ready();
+    check(!pump.take(&out), "stale pressed movement was discarded");
+  }
+
+  {
     // Initialization replies go ahead of controller state.
     report_pump pump;
     pump.reset();

@@ -75,6 +75,10 @@ bool report_pump::enqueue(
       return true;
     }
     case report_kind::transition: {
+      // A pending continuous snapshot was produced before this transition.
+      // Sending it afterwards could restore a button or trigger state that
+      // this transition just changed, so the transition supersedes it.
+      have_latest_ = false;
       if (transition_count_ == k_transition_capacity) {
         // Drop the oldest rather than the newest. Losing an old press whose
         // release is still queued leaves a button reading released, which is
