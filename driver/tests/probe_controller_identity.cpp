@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
-// Read-only inventory: compare HID, DirectInput, WGI, and GameInput identity.
+// Read-only inventory: compare HID, DirectInput, WGI, GameInput, and XInput.
 // Does not create controllers, submit reports, or install/change drivers.
 #define DIRECTINPUT_VERSION 0x0800
 #include <windows.h>
 #include <dinput.h>
 #include <hidsdi.h>
 #include <GameInput.h>
+#include <Xinput.h>
 #include <cstdio>
 #include <cstdint>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -14,14 +15,51 @@
 
 namespace {
 IDirectInput8W *direct_input = nullptr;
+unsigned gameinput_count = 0;
+unsigned gameinput_xbox_count = 0;
 
 void CALLBACK inspect_gameinput(GameInputCallbackToken, void *, IGameInputDevice *device,
                                 std::uint64_t, GameInputDeviceStatus current, GameInputDeviceStatus) {
   if (!(current & GameInputDeviceConnected)) return;
   const auto *info = device->GetDeviceInfo();
-  std::printf("GameInput: %s VID/PID=%04x:%04x input=%08x\n",
+  ++gameinput_count;
+  if (info->vendorId == 0x045e && (info->productId == 0x0b12 || info->productId == 0x02ea)) {
+    ++gameinput_xbox_count;
+  }
+  std::printf("GameInput: %s VID/PID=%04x:%04x revision=%04x input=%08x\n",
               info->displayName ? info->displayName->data : "(unnamed)",
-              info->vendorId, info->productId, static_cast<unsigned>(info->supportedInput));
+              info->vendorId, info->productId, info->revisionNumber,
+              static_cast<unsigned>(info->supportedInput));
+}
+
+void inspect_xinput() {
+  HMODULE library = LoadLibraryExW(L"xinput1_4.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (library == nullptr) {
+    std::printf("XInput is unavailable: %lu\n", GetLastError());
+    return;
+  }
+  const auto capabilities = reinterpret_cast<decltype(&XInputGetCapabilities)>(
+      GetProcAddress(library, "XInputGetCapabilities"));
+  if (capabilities == nullptr) {
+    std::printf("XInputGetCapabilities is unavailable\n");
+    FreeLibrary(library);
+    return;
+  }
+  unsigned connected = 0;
+  for (DWORD slot = 0; slot < XUSER_MAX_COUNT; ++slot) {
+    XINPUT_CAPABILITIES info {};
+    const DWORD result = capabilities(slot, 0, &info);
+    if (result == ERROR_SUCCESS) {
+      ++connected;
+      std::printf("XInput: slot=%lu type=%u subtype=%u flags=%04x\n",
+                  slot, info.Type, info.SubType, info.Flags);
+    } else if (result != ERROR_DEVICE_NOT_CONNECTED) {
+      std::printf("XInput: slot=%lu query failed: %lu\n", slot, result);
+    }
+  }
+  std::printf("XInput connected slot count: %u (OS slots, not Steam Input reservations)\n",
+              connected);
+  FreeLibrary(library);
 }
 
 BOOL CALLBACK inspect(const DIDEVICEINSTANCEW *instance, void *) {
@@ -100,6 +138,8 @@ int main() {
       if (SUCCEEDED(result)) {
         gameinput->StopCallback(token);
         gameinput->UnregisterCallback(token, UINT64_MAX);
+        std::printf("GameInput controller count: %u; native Xbox One/Series count: %u\n",
+                    gameinput_count, gameinput_xbox_count);
       } else {
         std::printf("GameInput enumeration failed: %08lx\n", static_cast<unsigned long>(result));
       }
@@ -109,5 +149,6 @@ int main() {
   } else {
     std::printf("GameInput is unavailable: %lu\n", GetLastError());
   }
+  inspect_xinput();
   return FAILED(enumeration) ? 1 : 0;
 }
