@@ -40,9 +40,30 @@ The Visual Studio WDK integration was present but the machine-wide WDK payload
 was absent. Microsoft's WDK NuGet package was unpacked locally; no installed
 Visual Studio or SDK files were modified.
 
-This is local build and signing evidence. Certificate trust, full Windows policy
-verification, driver installation, GameInput identity after installation, Steam
-deduplication, and live reconnect behavior have not yet been verified.
+## Post-install identity verified on 2026-10-03
+
+The user installed the corrected test package and supplied the read-only identity
+inventory. A subsequent read-only PnP query confirmed selected driver `0.1.0.40`
+(`oem34.inf`). The bundled test certificate is present in LocalMachine Root and
+TrustedPublisher. This confirms installation and the observed device behavior;
+no complete Windows signing-policy audit is claimed.
+
+| API | DualSense VID/PID after installation |
+| --- | --- |
+| HID attributes on the DirectInput device path | `054c:0ce6` |
+| DirectInput | `054c:0ce6` |
+| Windows.Gaming.Input | `054c:0ce6` |
+| GameInput | `054c:0ce6` |
+
+The DualSense now has a native `hid#vid_054c&pid_0ce6` path. Its previous
+GameInput `0000:0000` identity is gone. WGI and GameInput each enumerate two
+controllers: one DualSense and one Xbox (`045e:0b12`). GameInput reports one
+native Xbox, and OS XInput reports one connected slot (slot 0). This snapshot
+confirms the native identity correction while preserving Xbox enumeration.
+
+Steam controller counts, input/feedback behavior, repeated reconnects, and
+post-reboot behavior still need verification. The Windows inventory alone does
+not establish that Steam's separate Xbox backend duplicate has been resolved.
 
 ## Reproduce the local WDK build
 

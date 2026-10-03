@@ -6,7 +6,9 @@ For Vibepollo 2.0.0, the package must have protocol 2. The earlier direct-fork
 [build validation](NATIVE_HID_BUILD_VALIDATION.md) for the corrected build.
 
 These are manual test-host instructions. They change certificate trust and the
-installed gamepad driver. No installation was performed during the investigation.
+installed gamepad driver. Installation and the native API identity check have
+been completed on the affected host; see the [post-install results](NATIVE_HID_BUILD_VALIDATION.md).
+Steam and reconnect checks remain pending.
 
 ## Back up and prepare
 
