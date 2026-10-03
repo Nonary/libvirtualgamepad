@@ -1,5 +1,10 @@
 # Native controller identity regression
 
+See [build validation](../../../docs/NATIVE_HID_BUILD_VALIDATION.md) and
+[installation, live testing, and rollback](../../../docs/NATIVE_HID_TESTING.md).
+Build with current upstream's protocol version before installing alongside
+Vibepollo; older fork artifacts may not match the consumer's protocol.
+
 Build the standalone profile regression without loading a driver:
 
 ```powershell
