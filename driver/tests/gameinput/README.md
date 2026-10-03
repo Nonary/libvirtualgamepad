@@ -7,6 +7,9 @@ Vibepollo; older fork artifacts may not match the consumer's protocol.
 
 Build the standalone profile regression without loading a driver:
 
+The parent `driver/tests` CMake project also includes this regression, so the
+existing controller protocol CI runs it alongside the descriptor tests.
+
 ```powershell
 cmake -S driver/tests/gameinput -B build/identity-tests -G "Visual Studio 18 2026" -A x64
 cmake --build build/identity-tests --config Release

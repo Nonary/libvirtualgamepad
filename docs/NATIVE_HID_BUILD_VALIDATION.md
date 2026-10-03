@@ -85,7 +85,7 @@ not a claim that this combination has release qualification.
 
 ```powershell
 cmake -S driver/tests -B build/descriptor-tests -G "Visual Studio 18 2026" -A x64
-cmake --build build/descriptor-tests --config Release --target test_ds4_usb test_ds5_usb test_pid_descriptor --parallel 4
+cmake --build build/descriptor-tests --config Release --target test_ds4_usb test_ds5_usb test_pid_descriptor test_profile_identity --parallel 4
 ctest --test-dir build/descriptor-tests -C Release --output-on-failure
 cmake -S driver/tests/gameinput -B build/identity-tests -G "Visual Studio 18 2026" -A x64
 cmake --build build/identity-tests --config Release --target test_profile_identity probe_controller_identity --parallel 4
