@@ -392,9 +392,9 @@ void destroy_owned_controller(
   config.ProductID = definition->product_id;
   config.VersionNumber = definition->version_number;
   if (definition->hardware_ids != nullptr && definition->hardware_ids_bytes != 0) {
-    // Windows attaches xinputhid.sys by hardware ID, so this is what puts the
-    // child on the XInput path. It is set at runtime and never appears in the
-    // signed INF.
+    // Keep GameInput's PnP identity consistent with HID attributes. Xbox IDs
+    // additionally carry IG_00 to attach xinputhid.sys. These runtime IDs never
+    // appear in the signed INF.
     config.HardwareIDs = const_cast<PWSTR>(definition->hardware_ids);
     config.HardwareIDsLength = static_cast<USHORT>(definition->hardware_ids_bytes);
   }
