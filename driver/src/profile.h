@@ -48,18 +48,17 @@ struct profile_definition {
   const std::uint8_t *report_descriptor;
   std::size_t report_descriptor_size;
   // VHF leaves these zero unless the driver supplies them, which leaves the HID
-  // child with no identity for Windows PnP or for applications that match on
-  // one. They are never a real vendor's identifiers: a descriptor is not
-  // relabelled as somebody else's product by changing a VID/PID.
+  // child with no identity for applications that query HID attributes.
+  // Native console identities travel with their matching report contracts.
   std::uint16_t vendor_id;
   std::uint16_t product_id;
   std::uint16_t version_number;
   // True when the profile publishes the DirectInput PID report set and its
   // output and feature reports must be routed to the force-feedback engine.
   bool force_feedback;
-  // Optional REG_MULTI_SZ hardware ID list for the VHF child. Windows attaches
-  // xinputhid.sys by hardware ID, so this is what puts a profile on the XInput
-  // path. Null leaves VHF to synthesize the child's IDs.
+  // REG_MULTI_SZ hardware IDs for the VHF child, with its native VID/PID first.
+  // GameInput needs this PnP identity as well as the HID attributes above to
+  // agree with HIDAPI. Xbox profiles also include IG_00 for xinputhid.sys.
   const wchar_t *hardware_ids;
   std::size_t hardware_ids_bytes;
 };
