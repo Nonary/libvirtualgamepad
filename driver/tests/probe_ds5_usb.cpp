@@ -62,7 +62,10 @@ int main() {
       if (before.contains(detail->DevicePath)) continue;
       std::wstring path(detail->DevicePath);
       std::transform(path.begin(), path.end(), path.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-      if (path.find(L"hid_device_system_vhf") == std::wstring::npos) continue;
+      // Explicit native hardware IDs move the VID/PID to the front of the path.
+      // Keep accepting the generic VHF path for older installed drivers.
+      if (path.find(L"hid_device_system_vhf") == std::wstring::npos &&
+          path.find(L"vid_054c&pid_0ce6") == std::wstring::npos) continue;
       auto h = CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_OVERLAPPED, nullptr);
