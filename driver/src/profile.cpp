@@ -58,6 +58,15 @@ namespace {
 // real DualShock 4 or DualSense as a HID device, so the identity travels with
 // the device's report shape, touchpad, motion, battery, lightbar, and the
 // feature reports its host-side initialization reads.
+// VHF otherwise puts HID_DEVICE_SYSTEM_VHF first in the child's PnP IDs.
+// GameInput then reports VID/PID 0000:0000 even though HidD_GetAttributes and
+// DirectInput return the profile's IDs. SDL cannot match that GameInput device
+// to its HIDAPI device and exposes both. Put the native identity first, as the
+// Xbox profiles already do, without their XInput-only IG_00 marker.
+constexpr wchar_t k_ds4_hardware_ids[] = L"HID\\VID_054C&PID_09CC\0";
+constexpr wchar_t k_ds5_hardware_ids[] = L"HID\\VID_054C&PID_0CE6\0";
+constexpr wchar_t k_switch_hardware_ids[] = L"HID\\VID_057E&PID_2009\0";
+
 [[nodiscard]] const profile_definition &dualshock4_profile() noexcept {
   static const profile_definition definition = [] {
     profile_definition value {};
@@ -66,6 +75,8 @@ namespace {
     value.vendor_id = k_ds4_vendor_id;
     value.product_id = k_ds4_product_id;
     value.version_number = k_ds4_version;
+    value.hardware_ids = k_ds4_hardware_ids;
+    value.hardware_ids_bytes = sizeof(k_ds4_hardware_ids);
     return value;
   }();
   return definition;
@@ -79,6 +90,8 @@ namespace {
     value.vendor_id = k_ds5_vendor_id;
     value.product_id = k_ds5_product_id;
     value.version_number = k_ds5_version;
+    value.hardware_ids = k_ds5_hardware_ids;
+    value.hardware_ids_bytes = sizeof(k_ds5_hardware_ids);
     return value;
   }();
   return definition;
@@ -92,6 +105,8 @@ namespace {
     value.vendor_id = k_switch_vendor_id;
     value.product_id = k_switch_product_id;
     value.version_number = k_switch_version;
+    value.hardware_ids = k_switch_hardware_ids;
+    value.hardware_ids_bytes = sizeof(k_switch_hardware_ids);
     return value;
   }();
   return definition;

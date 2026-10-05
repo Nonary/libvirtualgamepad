@@ -30,3 +30,6 @@ if(WIN32)
     target_link_libraries(probe_ds5_usb PRIVATE setupapi hid)
     # Deliberately not a CTest: creates a controller on the installed driver.
 endif()
+
+# Include native PnP identity checks in the existing CI test entry point.
+add_subdirectory(gameinput)
