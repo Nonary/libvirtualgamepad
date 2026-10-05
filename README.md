@@ -30,6 +30,45 @@ The protocol lives in `include/libvirtualgamepad/protocol.h`. It is deliberately
 small, fixed-size, versioned, and `METHOD_BUFFERED`; it is the only ABI shared
 with Vibeshine.
 
+## Sleep and power
+
+No controller outlives the source device's working state. When the device
+leaves D0 (sleep, hibernate, shutdown, disable, removal), `EvtDeviceD0Exit`
+deletes every controller before the power IRP reaches `Vhf.sys`.
+
+That is required, not tidiness. For each live HID child, `VhfUm.dll` keeps a
+pull-request-notify IOCTL (`0xB0336`) pending in `Vhf.sys`, the channel for
+output and feature requests from applications. `Vhf.sys` holds it as a
+driver-owned request of its power-managed queue, never completes it on
+power-down, and registers no `EvtIoStop`. WDF does not finish a D3 transition
+while such a request is outstanding, and `Vhf.sys` is the power policy owner,
+so with any controller present, idle included, the sleep never completes and
+the power watchdog bugchecks the machine about five minutes later (`0x9F`,
+subcode 3, `Vhf.sys`). Deleting the controllers first is safe in that state:
+`VhfDelete` cancels the pending IOCTLs, and `Vhf.sys` handles the delete in the
+caller's context without waiting for PnP, which does not run during a power
+transition. PnP removes the children after resume.
+
+A deleted controller keeps its owner. The owner's next submit or poll for that
+slot fails with `ERROR_DEVICE_REMOVED`; `destroy_controller` then succeeds and
+`create_controller` restores the controller. While the device is out of D0,
+`create_controller` fails with `ERROR_NOT_READY`. Creation waits up to two
+seconds for PnP to remove the previous child of that slot, so two children never
+share an instance ID, and returns `ERROR_BUSY` if it is still present.
+
+A host may also destroy its controllers on `PBT_APMSUSPEND` and recreate them
+on resume, which leaves the driver nothing to delete. The suspend notification
+is not guaranteed on every path, so recreating on `ERROR_DEVICE_REMOVED` is the
+part a host must implement.
+
+`driver/tests/probe_sleep.cpp` puts the machine through a real sleep with
+controllers present and checks the whole cycle. Run it elevated on a host with
+S3 and wake timers enabled:
+
+```powershell
+probe_sleep.exe idle 45 C:\temp\sleep-idle.log
+```
+
 ## Profile contract
 
 The target profile set is deliberately explicit:
