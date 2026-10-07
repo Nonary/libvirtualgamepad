@@ -1184,6 +1184,59 @@ int main() {
           "a foreign report id is rejected");
   }
 
+  for (const bool have_client_input : {false, true}) {
+    // Reproduce Chromium's final initialization step with no later client
+    // packets. The mode ACK must be followed by a fresh full input report.
+    switch_state state {};
+    state.reset();
+    input_state_request last {};
+    last.buttons = have_client_input ? button_mask::south : 0;
+    report_pump pump;
+    pump.reset();
+    pump.set_ready();
+    if (have_client_input) {
+      const auto initial = encode_switch_input(last, &state);
+      pump.enqueue(&initial, sizeof(initial), initial.report_id, report_kind::continuous);
+      check(pump.take() != nullptr, "initial client input consumed before initialization");
+      pump.set_ready();
+    }
+
+    std::uint8_t request[12] {};
+    request[0] = k_switch_rumble_subcommand_id;
+    request[10] = k_switch_sub_set_input_mode;
+    request[11] = k_switch_input_report_id;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      check(queue_switch_subcommand_reply(request, sizeof(request), last, &state, pump),
+            "full input mode queues its replies even on repeated initialization");
+      const auto *ack = pump.take();
+      check(ack != nullptr && ack->report_id == k_switch_subcommand_reply_id &&
+              ack->data[14] == k_switch_sub_set_input_mode,
+            "mode acknowledgement precedes full state");
+      check(pump.take() == nullptr, "full state waits until VHF releases the ACK");
+      pump.set_ready();
+      const auto *full = pump.take();
+      check(full != nullptr && full->report_id == k_switch_input_report_id &&
+              full->length == sizeof(switch_input_report),
+            "quiet controller supplies full state without another client packet");
+      if (full != nullptr) {
+        check(full->data[3] == (have_client_input ? switch_b : 0),
+              "initialization preserves the latest buttons or neutral defaults");
+      }
+      pump.set_ready();
+      check(pump.take() == nullptr, "initialization does not start an unbounded report loop");
+    }
+
+    // Other modes and a command missing its mode byte owe only an ACK.
+    request[11] = 0x3F;
+    for (const std::size_t size : {sizeof(request), sizeof(request) - 1}) {
+      check(queue_switch_subcommand_reply(request, size, last, &state, pump),
+            "other or missing input mode is acknowledged");
+      check(pump.take() != nullptr, "mode ACK available");
+      pump.set_ready();
+      check(pump.take() == nullptr, "no unsolicited full report for another input mode");
+    }
+  }
+
   {
     // A deferred consumer retains the actual submission buffer after the
     // submitting function returns, while other producers change every queue.

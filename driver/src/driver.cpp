@@ -1037,10 +1037,7 @@ void evt_vhf_write_report(
 
     auto *const context = slot->parent;
     switch_usb_reply usb_reply {};
-    switch_subcommand_reply sub_reply {};
-    PUCHAR reply_buffer = nullptr;
-    ULONG reply_size = 0;
-    UCHAR reply_id = 0;
+    bool queued_reply = false;
 
     lock_context(context);
     if (context->stopping || slot->state != slot_state::active) {
@@ -1058,17 +1055,15 @@ void evt_vhf_write_report(
       if (transfer->reportId == k_switch_usb_command_id) {
         if (handle_switch_usb_command(transfer->reportBuffer, transfer->reportBufferLen,
                                       &slot->switch_pro, &usb_reply) != 0) {
-          reply_buffer = reinterpret_cast<PUCHAR>(&usb_reply);
-          reply_size = sizeof(usb_reply);
-          reply_id = k_switch_usb_reply_id;
+          queued_reply = slot->pump.enqueue(&usb_reply, sizeof(usb_reply),
+                                            k_switch_usb_reply_id, report_kind::priority);
         }
       } else if (transfer->reportId == k_switch_rumble_subcommand_id) {
-        if (handle_switch_subcommand(transfer->reportBuffer, transfer->reportBufferLen,
-                                     slot->last_input, &slot->switch_pro, &sub_reply) != 0) {
-          reply_buffer = reinterpret_cast<PUCHAR>(&sub_reply);
-          reply_size = sizeof(sub_reply);
-          reply_id = k_switch_subcommand_reply_id;
-        }
+        // Queue both replies under the state lock, so a concurrent input
+        // update cannot put stale state behind the mode acknowledgement.
+        queued_reply = queue_switch_subcommand_reply(
+          transfer->reportBuffer, transfer->reportBufferLen,
+          slot->last_input, &slot->switch_pro, slot->pump);
       }
       status = STATUS_SUCCESS;
     }
@@ -1080,10 +1075,10 @@ void evt_vhf_write_report(
     // callback is safe without the lifetime gate: VhfDelete waits for this
     // callback to return, so the handle cannot go away underneath it, and
     // taking the gate here would deadlock against that wait.
-    if (NT_SUCCESS(status) && reply_size != 0 && vhf != nullptr) {
+    if (NT_SUCCESS(status) && queued_reply && vhf != nullptr) {
       // A host blocked on a handshake reply is not streaming yet, so this goes
       // ahead of any controller state already waiting.
-      std::ignore = pump_report(context, *slot, reply_buffer, reply_size, reply_id,
+      std::ignore = pump_report(context, *slot, nullptr, 0, 0,
                                 lvg::driver::report_kind::priority);
     }
 
