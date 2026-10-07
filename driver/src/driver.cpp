@@ -82,6 +82,9 @@ struct controller_slot {
   // Paces input reports so reads do not always complete instantly, which would
   // leave a polling application spinning.
   lvg::driver::report_pump pump;
+  // Both the packet and its pump-owned payload survive submission until VHF
+  // grants the next read. They must also survive until VhfDelete completes.
+  HID_XFER_PACKET read_transfer;
   // VHF does not copy these, so they live for as long as the child does.
   GUID container_id;
   wchar_t instance_id[32];
@@ -485,8 +488,7 @@ NTSTATUS pump_report(
   const ULONG length,
   const UCHAR report_id,
   const lvg::driver::report_kind kind) noexcept {
-  lvg::driver::report_buffer next {};
-  bool have_next = false;
+  lvg::driver::report_buffer *next = nullptr;
   VHFHANDLE vhf = nullptr;
 
   lock_context(context);
@@ -497,24 +499,20 @@ NTSTATUS pump_report(
   if (data != nullptr) {
     std::ignore = slot.pump.enqueue(data, length, report_id, kind);
   }
-  have_next = slot.pump.take(&next);
+  next = slot.pump.take();
+  if (next != nullptr) {
+    slot.read_transfer = {next->data, next->length, next->report_id};
+  }
   vhf = slot.vhf;
   unlock_context(context);
 
-  if (!have_next) {
+  if (next == nullptr) {
     return STATUS_SUCCESS;
   }
 
-  HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
-  const NTSTATUS status = VhfReadReportSubmit(vhf, &transfer);
-  if (!NT_SUCCESS(status)) {
-    // The report was consumed from the pump; put readiness back so the next
-    // submission is not stranded behind a failure that has already passed.
-    lock_context(context);
-    slot.pump.set_ready();
-    unlock_context(context);
-  }
-  return status;
+  // Only the VHF callback may grant another submission. A failed call must
+  // not manufacture readiness, potentially overwriting an outstanding read.
+  return VhfReadReportSubmit(vhf, &slot.read_transfer);
 }
 
 // VHF can accept another report. Drain one, preferring initialization replies,
@@ -525,26 +523,23 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return;
   }
 
-  lvg::driver::report_buffer next {};
-  bool have_next = false;
+  lvg::driver::report_buffer *next = nullptr;
   VHFHANDLE vhf = nullptr;
 
   auto *const context = slot->parent;
   lock_context(context);
   slot->pump.set_ready();
   if (!context->stopping && slot->state == slot_state::active) {
-    have_next = slot->pump.take(&next);
+    next = slot->pump.take();
+    if (next != nullptr) {
+      slot->read_transfer = {next->data, next->length, next->report_id};
+    }
     vhf = slot->vhf;
   }
   unlock_context(context);
 
-  if (have_next && vhf != nullptr) {
-    HID_XFER_PACKET transfer {next.data, next.length, next.report_id};
-    if (!NT_SUCCESS(VhfReadReportSubmit(vhf, &transfer))) {
-      lock_context(context);
-      slot->pump.set_ready();
-      unlock_context(context);
-    }
+  if (next != nullptr && vhf != nullptr) {
+    std::ignore = VhfReadReportSubmit(vhf, &slot->read_transfer);
   }
 }
 
