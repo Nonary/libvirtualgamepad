@@ -12,6 +12,10 @@ namespace lvg {
 // Opens the driver's private WDF device interface, never a HID child path.
 // A connection owns the controller slots it creates. Closing it releases those
 // slots in the driver even if the caller did not explicitly destroy them.
+//
+// A controller is deleted when the machine sleeps, hibernates, or shuts down.
+// Its next submit or poll returns ERROR_DEVICE_REMOVED; destroy_controller()
+// then create_controller() on the same slot restores it after resume.
 class client final {
  public:
   client() noexcept = default;

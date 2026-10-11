@@ -29,6 +29,11 @@ if(WIN32)
     target_include_directories(probe_ds5_usb PRIVATE ../../include)
     target_link_libraries(probe_ds5_usb PRIVATE setupapi hid)
     # Deliberately not a CTest: creates a controller on the installed driver.
+    add_executable(probe_sleep probe_sleep.cpp ../../client/client.cpp)
+    target_compile_features(probe_sleep PRIVATE cxx_std_20)
+    target_include_directories(probe_sleep PRIVATE ../../include)
+    target_link_libraries(probe_sleep PRIVATE setupapi hid cfgmgr32 powrprof wtsapi32 xinput)
+    # Deliberately not a CTest: puts the machine to sleep.
 endif()
 
 # Include native PnP identity checks in the existing CI test entry point.
