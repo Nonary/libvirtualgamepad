@@ -76,14 +76,20 @@ inline WDFDEVICE WdfFileObjectGetDevice(WDFFILEOBJECT o) { return o->parent; }
 inline WDFDEVICE WdfIoQueueGetDevice(WDFQUEUE o) { return o->parent; }
 inline WDFFILEOBJECT WdfRequestGetFileObject(WDFREQUEST o) { return o->parent; }
 
-// Unexercised WDF entry scaffolding is compile-only and fails closed. These
-// mocks do not claim to verify device creation, request marshalling, or IRQL.
+// Request marshalling remains compile-only and fails closed. Initialization
+// below can run against test-owned WDF objects; it does not model OS power
+// transitions, automatic object deletion, request marshalling, or IRQL.
 inline NTSTATUS WdfRequestRetrieveInputBuffer(WDFREQUEST, size_t, PVOID *, size_t *) { return STATUS_NOT_SUPPORTED; }
 inline NTSTATUS WdfRequestRetrieveOutputBuffer(WDFREQUEST, size_t, PVOID *, size_t *) { return STATUS_NOT_SUPPORTED; }
 inline void WdfRequestComplete(WDFREQUEST, NTSTATUS) {}
 inline void WdfRequestCompleteWithInformation(WDFREQUEST, NTSTATUS, ULONG_PTR) {}
-struct WDF_FILEOBJECT_CONFIG {};
-inline void WDF_FILEOBJECT_CONFIG_INIT(WDF_FILEOBJECT_CONFIG *, EVT_WDF_DEVICE_FILE_CREATE *, EVT_WDF_FILE_CLOSE *, void *) {}
+struct WDF_FILEOBJECT_CONFIG {
+  EVT_WDF_DEVICE_FILE_CREATE *EvtDeviceFileCreate {};
+  EVT_WDF_FILE_CLOSE *EvtFileClose {};
+};
+inline void WDF_FILEOBJECT_CONFIG_INIT(WDF_FILEOBJECT_CONFIG *c, EVT_WDF_DEVICE_FILE_CREATE *create, EVT_WDF_FILE_CLOSE *close, void *) {
+  *c = {create, close};
+}
 struct WDF_OBJECT_ATTRIBUTES {
   WDFOBJECT ParentObject {};
   EVT_WDF_OBJECT_CONTEXT_CLEANUP *EvtCleanupCallback {};
@@ -95,26 +101,104 @@ struct WDF_PNPPOWER_EVENT_CALLBACKS {
   EVT_WDF_DEVICE_RELEASE_HARDWARE *EvtDeviceReleaseHardware {};
 };
 inline void WDF_PNPPOWER_EVENT_CALLBACKS_INIT(WDF_PNPPOWER_EVENT_CALLBACKS *p) { *p = {}; }
-inline void WdfFdoInitSetFilter(PWDFDEVICE_INIT) {}
-inline void WdfDeviceInitSetFileObjectConfig(PWDFDEVICE_INIT, WDF_FILEOBJECT_CONFIG *, WDF_OBJECT_ATTRIBUTES *) {}
-inline void WdfDeviceInitSetPnpPowerEventCallbacks(PWDFDEVICE_INIT, WDF_PNPPOWER_EVENT_CALLBACKS *) {}
-inline NTSTATUS WdfDeviceCreate(PWDFDEVICE_INIT *, WDF_OBJECT_ATTRIBUTES *, WDFDEVICE *) { return STATUS_NOT_SUPPORTED; }
 struct WDF_TIMER_CONFIG { bool AutomaticSerialization {}; };
 inline void WDF_TIMER_CONFIG_INIT_PERIODIC(WDF_TIMER_CONFIG *, EVT_WDF_TIMER *, LONG) {}
-inline NTSTATUS WdfTimerCreate(WDF_TIMER_CONFIG *, WDF_OBJECT_ATTRIBUTES *, WDFTIMER *) { return STATUS_NOT_SUPPORTED; }
-inline NTSTATUS WdfWaitLockCreate(WDF_OBJECT_ATTRIBUTES *, WDFWAITLOCK *) { return STATUS_NOT_SUPPORTED; }
-inline NTSTATUS WdfIoTargetCreate(WDFDEVICE, WDF_OBJECT_ATTRIBUTES *, WDFIOTARGET *) { return STATUS_NOT_SUPPORTED; }
-inline NTSTATUS WdfDeviceCreateDeviceInterface(WDFDEVICE, const GUID *, void *) { return STATUS_NOT_SUPPORTED; }
+enum WDF_TRI_STATE { WdfFalse, WdfTrue, WdfUseDefault };
+enum WDF_IO_QUEUE_DISPATCH_TYPE { WdfIoQueueDispatchInvalid, WdfIoQueueDispatchSequential };
 struct WDF_IO_QUEUE_CONFIG {
-  bool PowerManaged {};
+  WDF_TRI_STATE PowerManaged {WdfUseDefault};
+  WDF_IO_QUEUE_DISPATCH_TYPE DispatchType {};
+  bool DefaultQueue {};
   EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL *EvtIoDeviceControl {};
 };
-inline constexpr bool WdfIoQueueDispatchSequential = true, WdfTrue = true, WdfFalse = false;
-inline void WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(WDF_IO_QUEUE_CONFIG *, bool) {}
-inline NTSTATUS WdfIoQueueCreate(WDFDEVICE, WDF_IO_QUEUE_CONFIG *, void *, void *) { return STATUS_NOT_SUPPORTED; }
-struct WDF_DRIVER_CONFIG { ULONG DriverPoolTag {}; };
-inline void WDF_DRIVER_CONFIG_INIT(WDF_DRIVER_CONFIG *, EVT_WDF_DRIVER_DEVICE_ADD *) {}
-inline NTSTATUS WdfDriverCreate(PDRIVER_OBJECT, PUNICODE_STRING, void *, WDF_DRIVER_CONFIG *, void *) { return STATUS_NOT_SUPPORTED; }
+inline void WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(WDF_IO_QUEUE_CONFIG *c, WDF_IO_QUEUE_DISPATCH_TYPE dispatch) {
+  *c = {}; c->DispatchType = dispatch; c->DefaultQueue = true;
+}
+struct WDF_DRIVER_CONFIG {
+  ULONG DriverPoolTag {};
+  EVT_WDF_DRIVER_DEVICE_ADD *EvtDriverDeviceAdd {};
+};
+inline void WDF_DRIVER_CONFIG_INIT(WDF_DRIVER_CONFIG *c, EVT_WDF_DRIVER_DEVICE_ADD *add) {
+  *c = {}; c->EvtDriverDeviceAdd = add;
+}
+
+// Supply storage at the OS allocation boundary, never a copy of device-add
+// logic. Record the configuration actually passed to WdfIoQueueCreate without
+// accepting/rejecting it based on the policy the test intends to verify.
+struct fake_wdf_initialization {
+  WDFDEVICE device {};
+  WDFWAITLOCK lifetime {}, state {};
+  WDFIOTARGET target {};
+  WDFTIMER timer {};
+  WDFQUEUE queue {};
+  EVT_WDF_DRIVER_DEVICE_ADD *add {};
+  WDF_FILEOBJECT_CONFIG files {};
+  WDF_PNPPOWER_EVENT_CALLBACKS pnp {};
+  WDF_IO_QUEUE_CONFIG queue_config {};
+  EVT_WDF_OBJECT_CONTEXT_CLEANUP *target_cleanup {};
+  bool filter {}, filter_at_device_create {}, interface_created {};
+  int lock_creates {}, queue_creates {};
+  NTSTATUS timer_status {STATUS_SUCCESS}, queue_status {STATUS_SUCCESS};
+};
+inline fake_wdf_initialization *fake_initialization {};
+inline void WdfFdoInitSetFilter(PWDFDEVICE_INIT) {
+  if (fake_initialization) fake_initialization->filter = true;
+}
+inline void WdfDeviceInitSetFileObjectConfig(PWDFDEVICE_INIT, WDF_FILEOBJECT_CONFIG *c, WDF_OBJECT_ATTRIBUTES *) {
+  if (fake_initialization) fake_initialization->files = *c;
+}
+inline void WdfDeviceInitSetPnpPowerEventCallbacks(PWDFDEVICE_INIT, WDF_PNPPOWER_EVENT_CALLBACKS *p) {
+  if (fake_initialization) fake_initialization->pnp = *p;
+}
+inline NTSTATUS WdfDeviceCreate(PWDFDEVICE_INIT *init, WDF_OBJECT_ATTRIBUTES *, WDFDEVICE *device) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  auto &f = *fake_initialization;
+  fake_require(init && *init && f.device && f.device->context, "missing initialization storage");
+  f.filter_at_device_create = f.filter;
+  *device = f.device; *init = nullptr;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfTimerCreate(WDF_TIMER_CONFIG *, WDF_OBJECT_ATTRIBUTES *a, WDFTIMER *timer) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  auto &f = *fake_initialization;
+  if (!NT_SUCCESS(f.timer_status)) return f.timer_status;
+  *timer = f.timer; (*timer)->parent = a->ParentObject;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfWaitLockCreate(WDF_OBJECT_ATTRIBUTES *a, WDFWAITLOCK *lock) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  auto &f = *fake_initialization;
+  fake_require(f.lock_creates < 2, "unexpected initialization lock");
+  *lock = f.lock_creates++ == 0 ? f.lifetime : f.state;
+  (*lock)->parent = a->ParentObject;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfIoTargetCreate(WDFDEVICE, WDF_OBJECT_ATTRIBUTES *a, WDFIOTARGET *target) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  auto &f = *fake_initialization;
+  *target = f.target; (*target)->parent = a->ParentObject;
+  f.target_cleanup = a->EvtCleanupCallback;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfDeviceCreateDeviceInterface(WDFDEVICE, const GUID *, void *) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  fake_initialization->interface_created = true;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfIoQueueCreate(WDFDEVICE device, WDF_IO_QUEUE_CONFIG *c, void *, WDFQUEUE *queue) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  auto &f = *fake_initialization;
+  ++f.queue_creates; f.queue_config = *c;
+  if (!NT_SUCCESS(f.queue_status)) return f.queue_status;
+  f.queue->parent = device;
+  if (queue) *queue = f.queue;
+  return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfDriverCreate(PDRIVER_OBJECT, PUNICODE_STRING, void *, WDF_DRIVER_CONFIG *c, void *) {
+  if (!fake_initialization) return STATUS_NOT_SUPPORTED;
+  fake_initialization->add = c->EvtDriverDeviceAdd;
+  return STATUS_SUCCESS;
+}
 #define WDF_NO_EVENT_CALLBACK nullptr
 #define WDF_NO_OBJECT_ATTRIBUTES nullptr
 #define WDF_NO_HANDLE nullptr

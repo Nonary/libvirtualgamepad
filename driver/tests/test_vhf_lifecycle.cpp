@@ -141,6 +141,30 @@ struct fixture {
     return create_controller(&context, &owner, request);
   }
 };
+
+struct initialized_fixture: fixture {
+  fake_wdf_object init, queue;
+  fake_wdf_initialization initialization;
+  NTSTATUS add_status {STATUS_NOT_SUPPORTED};
+  explicit initialized_fixture(
+    NTSTATUS timer_status = STATUS_SUCCESS,
+    NTSTATUS queue_status = STATUS_SUCCESS) {
+    initialization.device = &device;
+    initialization.lifetime = &lifetime;
+    initialization.state = &state;
+    initialization.target = &target;
+    initialization.timer = &timer;
+    initialization.queue = &queue;
+    initialization.timer_status = timer_status;
+    initialization.queue_status = queue_status;
+    fake_require(fake_initialization == nullptr, "overlapping initialization fixtures");
+    fake_initialization = &initialization;
+    CHECK(DriverEntry(nullptr, nullptr) == STATUS_SUCCESS);
+    CHECK(initialization.add != nullptr);
+    if (initialization.add) add_status = initialization.add(nullptr, &init);
+    fake_initialization = nullptr;
+  }
+};
 constexpr std::array profiles {lvg::profile::dualshock_4, lvg::profile::dualsense,
   lvg::profile::switch_pro, lvg::profile::xbox_one, lvg::profile::xbox_series};
 
@@ -160,6 +184,97 @@ void check_initial_callbacks(VHFHANDLE h) {
   ready(h);
   CHECK(output(slot) == STATUS_SUCCESS);
   if (slot.selected_profile != lvg::profile::switch_pro) CHECK(slot.feedback_pending);
+}
+
+void test_device_add_configures_non_power_managed_filter_queue() {
+  initialized_fixture f;
+  CHECK(f.add_status == STATUS_SUCCESS);
+  const auto &initialization = f.initialization;
+  CHECK(initialization.filter_at_device_create);
+  CHECK(initialization.interface_created);
+  CHECK(initialization.queue_creates == 1);
+  // This is the runtime value passed by the shipping evt_device_add body to
+  // WdfIoQueueCreate. The shim records it without imposing the expected policy.
+  CHECK(initialization.queue_config.PowerManaged == WdfFalse);
+  CHECK(initialization.queue_config.DefaultQueue);
+  CHECK(initialization.queue_config.DispatchType == WdfIoQueueDispatchSequential);
+  CHECK(initialization.queue_config.EvtIoDeviceControl == evt_io_device_control);
+  CHECK(initialization.files.EvtDeviceFileCreate == evt_file_create);
+  CHECK(initialization.files.EvtFileClose == evt_file_close);
+  CHECK(initialization.pnp.EvtDevicePrepareHardware == evt_prepare_hardware);
+  CHECK(initialization.pnp.EvtDeviceReleaseHardware == evt_release_hardware);
+  CHECK(initialization.target_cleanup == evt_vhf_target_cleanup);
+  CHECK(f.context.lifetime_gate == &f.lifetime);
+  CHECK(f.context.state_lock == &f.state);
+  CHECK(f.context.local_vhf_target == &f.target);
+  CHECK(f.lifetime.parent == &f.device);
+  CHECK(f.state.parent == &f.lifetime);
+  CHECK(f.target.parent == &f.state);
+  CHECK(f.target_data.device == &f.context);
+  CHECK(f.queue.parent == &f.device);
+}
+
+void test_initialized_device_release_restart_and_cleanup() {
+  initialized_fixture f;
+  CHECK(f.add_status == STATUS_SUCCESS);
+  const auto &pnp = f.initialization.pnp;
+  CHECK(pnp.EvtDevicePrepareHardware != nullptr);
+  CHECK(pnp.EvtDeviceReleaseHardware != nullptr);
+  CHECK(f.initialization.target_cleanup != nullptr);
+  if (!pnp.EvtDevicePrepareHardware || !pnp.EvtDeviceReleaseHardware || !f.initialization.target_cleanup) return;
+  CHECK(!f.context.vhf_target_open);
+  CHECK(fake_opens == 0);
+  CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(fake_opens == 1);
+  on_start = check_initial_callbacks;
+  for (std::uint32_t n = 0; n < profiles.size(); ++n) CHECK(f.create(profiles[n], n) == STATUS_SUCCESS);
+  fake_close_hook = [&] { for (auto &h : handles) CHECK(h->deleted); };
+  on_delete = [&](VHFHANDLE h) {
+    CHECK(f.context.stopping);
+    CHECK(input(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+  };
+  CHECK(pnp.EvtDeviceReleaseHardware(&f.device, nullptr) == STATUS_SUCCESS);
+  CHECK(deletes == static_cast<int>(profiles.size()));
+  CHECK(fake_closes == 1);
+  CHECK(!f.context.vhf_target_open);
+  CHECK(!f.timer.armed);
+  for (auto &slot : f.context.controllers) CHECK(slot.state == slot_state::empty);
+  CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_NOT_READY);
+  CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(fake_opens == 2);
+  CHECK(!f.context.stopping);
+  CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+  f.initialization.target_cleanup(&f.target);
+  CHECK(deletes == static_cast<int>(profiles.size()) + 1);
+  CHECK(f.context.local_vhf_target == nullptr);
+  CHECK(!f.context.vhf_target_open);
+  CHECK(fake_closes == 1);
+  // Model only the documented boundary ordering: WDF closes the target after
+  // invoking its registered cleanup callback. The callback body above is real.
+  WdfIoTargetClose(&f.target);
+  CHECK(fake_closes == 2);
+  CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_NOT_READY);
+}
+
+void test_device_add_without_optional_timer() {
+  initialized_fixture f(STATUS_NOT_SUPPORTED);
+  CHECK(f.add_status == STATUS_SUCCESS);
+  CHECK(f.initialization.queue_creates == 1);
+  CHECK(f.context.pid_timer == nullptr);
+  CHECK(f.initialization.pnp.EvtDevicePrepareHardware != nullptr);
+  CHECK(f.initialization.pnp.EvtDeviceReleaseHardware != nullptr);
+  if (!f.initialization.pnp.EvtDevicePrepareHardware || !f.initialization.pnp.EvtDeviceReleaseHardware) return;
+  CHECK(f.initialization.pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+  CHECK(f.initialization.pnp.EvtDeviceReleaseHardware(&f.device, nullptr) == STATUS_SUCCESS);
+  CHECK(deletes == 1);
+  CHECK(fake_closes == 1);
+}
+
+void test_device_add_propagates_queue_creation_failure() {
+  initialized_fixture f(STATUS_SUCCESS, STATUS_ACCESS_DENIED);
+  CHECK(f.initialization.queue_creates == 1);
+  CHECK(f.add_status == STATUS_ACCESS_DENIED);
 }
 
 void test_profiles() {
@@ -462,9 +577,20 @@ NTSTATUS VhfReadReportSubmit(VHFHANDLE h, PHID_XFER_PACKET packet) {
   if (on_submit) on_submit(h);
   return submit_result;
 }
-int main() {
-  test_profiles(); test_start_rollback(); test_prestart_failures();
-  test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
-  std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
+int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--initialization-only") == 0) {
+    test_device_add_configures_non_power_managed_filter_queue();
+    test_initialized_device_release_restart_and_cleanup();
+    test_device_add_without_optional_timer();
+    test_device_add_propagates_queue_creation_failure();
+    std::printf("VHF initialization behavior: %d checks, %d failures\n", checks.load(), failures.load());
+  } else if (argc == 1) {
+    test_profiles(); test_start_rollback(); test_prestart_failures();
+    test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
+    std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
+  } else {
+    std::fprintf(stderr, "usage: %s [--initialization-only]\n", argv[0]);
+    return 2;
+  }
   return failures == 0 ? 0 : 1;
 }

@@ -1,14 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(LibVirtualGamepadTests LANGUAGES CXX)
 enable_testing()
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-add_test(
-    NAME vhf_power_policy_contract
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test_power_policy_contract.py
-            ${CMAKE_CURRENT_SOURCE_DIR}/../src/driver.cpp)
-
 add_executable(test_ds4_usb test_ds4_usb.cpp)
 target_compile_features(test_ds4_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds4_usb PRIVATE ../../include)
@@ -66,7 +58,8 @@ target_compile_features(test_vhf_lifecycle PRIVATE cxx_std_20)
 target_include_directories(test_vhf_lifecycle BEFORE PRIVATE support/vhf ../src ../../include)
 target_link_libraries(test_vhf_lifecycle PRIVATE Threads::Threads)
 add_test(NAME vhf_lifecycle_contract COMMAND test_vhf_lifecycle)
-set_tests_properties(vhf_lifecycle_contract PROPERTIES TIMEOUT 30)
+add_test(NAME vhf_initialization_behavior COMMAND test_vhf_lifecycle --initialization-only)
+set_tests_properties(vhf_lifecycle_contract vhf_initialization_behavior PROPERTIES TIMEOUT 30)
 
 if(NOT WIN32)
     # These protocol-only tests need the fixed Windows ABI declarations, never
