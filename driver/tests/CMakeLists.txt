@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 project(LibVirtualGamepadTests LANGUAGES CXX)
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_test(
+    NAME vhf_power_policy_contract
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_power_policy_contract.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/../src/driver.cpp)
+
 add_executable(test_ds4_usb test_ds4_usb.cpp)
 target_compile_features(test_ds4_usb PRIVATE cxx_std_20)
 target_include_directories(test_ds4_usb PRIVATE ../../include)

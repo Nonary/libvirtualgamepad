@@ -1847,9 +1847,10 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
 
   WDF_IO_QUEUE_CONFIG queue_config;
   WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queue_config, WdfIoQueueDispatchSequential);
-  // Filter queues default to non-power-managed. Keep control requests tied to
-  // the device power state so stop and resume cannot race controller I/O.
-  queue_config.PowerManaged = WdfTrue;
+  // VHF owns power policy below this upper filter, so this queue must continue
+  // dispatching while VHF drives a D0 transition. The existing lifetime and
+  // stopping gates keep control requests away from released VHF resources.
+  queue_config.PowerManaged = WdfFalse;
   queue_config.EvtIoDeviceControl = evt_io_device_control;
   return WdfIoQueueCreate(device, &queue_config, WDF_NO_OBJECT_ATTRIBUTES, nullptr);
 }

@@ -109,7 +109,7 @@ struct WDF_IO_QUEUE_CONFIG {
   bool PowerManaged {};
   EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL *EvtIoDeviceControl {};
 };
-inline constexpr bool WdfIoQueueDispatchSequential = true, WdfTrue = true;
+inline constexpr bool WdfIoQueueDispatchSequential = true, WdfTrue = true, WdfFalse = false;
 inline void WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(WDF_IO_QUEUE_CONFIG *, bool) {}
 inline NTSTATUS WdfIoQueueCreate(WDFDEVICE, WDF_IO_QUEUE_CONFIG *, void *, void *) { return STATUS_NOT_SUPPORTED; }
 struct WDF_DRIVER_CONFIG { ULONG DriverPoolTag {}; };
