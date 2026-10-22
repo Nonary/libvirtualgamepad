@@ -3,6 +3,7 @@
 // Execute the complete shipping driver body, with real profile/pump code and
 // modeled OS boundaries. This does not install a driver or validate WDK/IRQL.
 #include "../src/driver.cpp"
+#include "sleep_churn_progress.h"
 
 #include <array>
 #include <chrono>
@@ -118,6 +119,9 @@ struct fixture {
     fake_missing_file = false;
     creates = starts = deletes = submits = fake_opens = fake_closes = 0;
     handles.clear();
+    fake_cm_ids = {0, 0}; fake_cm_queries = 0; fake_cm_hook = {};
+    fake_cm_size_result = fake_cm_list_result = CR_SUCCESS; fake_heap_failure = false;
+    context.powered = true;
     device.context = &context; target.context = &target_data;
     target_data.device = &context;
     owner.parent = stranger.parent = timer.parent = &device;
@@ -225,6 +229,7 @@ void test_initialized_device_release_restart_and_cleanup() {
   CHECK(!f.context.vhf_target_open);
   CHECK(fake_opens == 0);
   CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(fake_opens == 1);
   on_start = check_initial_callbacks;
   for (std::uint32_t n = 0; n < profiles.size(); ++n) CHECK(f.create(profiles[n], n) == STATUS_SUCCESS);
@@ -241,6 +246,7 @@ void test_initialized_device_release_restart_and_cleanup() {
   for (auto &slot : f.context.controllers) CHECK(slot.state == slot_state::empty);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_NOT_READY);
   CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(fake_opens == 2);
   CHECK(!f.context.stopping);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
@@ -265,6 +271,7 @@ void test_device_add_without_optional_timer() {
   CHECK(f.initialization.pnp.EvtDeviceReleaseHardware != nullptr);
   if (!f.initialization.pnp.EvtDevicePrepareHardware || !f.initialization.pnp.EvtDeviceReleaseHardware) return;
   CHECK(f.initialization.pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(f.initialization.pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
   CHECK(f.initialization.pnp.EvtDeviceReleaseHardware(&f.device, nullptr) == STATUS_SUCCESS);
   CHECK(deletes == 1);
@@ -500,6 +507,7 @@ void test_release_restart() {
   for (auto &slot : f.context.controllers) CHECK(slot.state == slot_state::empty);
   CHECK(!f.timer.armed); CHECK(!f.context.vhf_target_open);
   CHECK(evt_prepare_hardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(evt_d0_entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(!f.context.stopping); CHECK(fake_opens == 2);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
   fake_close_hook = {};
@@ -577,6 +585,80 @@ NTSTATUS VhfReadReportSubmit(VHFHANDLE h, PHID_XFER_PACKET packet) {
   if (on_submit) on_submit(h);
   return submit_result;
 }
+void test_power_lifecycle() {
+  sleep_churn_progress churn;
+  for (int i = 0; i < 200; ++i) churn.completed(false, true, true);
+  CHECK(churn.total == 200); CHECK(!churn.recovered());
+  churn.completed(true, false, true); churn.completed(true, true, false);
+  CHECK(!churn.recovered());
+  churn.completed(true, true, true); CHECK(churn.recovered());
+
+  for (auto profile : profiles) {
+    fixture f;
+    CHECK(f.create(profile) == STATUS_SUCCESS);
+    auto &slot = f.context.controllers[0];
+    on_delete = [&](VHFHANDLE h) {
+      CHECK(!f.context.powered);
+      CHECK(slot.state == slot_state::stopping);
+      CHECK(input(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+      retained_unchanged(h);
+    };
+    CHECK(evt_d0_exit(&f.device, 0) == STATUS_SUCCESS);
+    CHECK(deletes == 1); CHECK(slot.state == slot_state::lost);
+    CHECK(slot.owner == &f.owner); CHECK(slot.vhf == nullptr);
+    CHECK(!f.timer.armed);
+    CHECK(f.create(profile) == STATUS_DEVICE_POWERED_OFF);
+    CHECK(fake_cm_queries == 1); // Off-state calls never enumerate/poll.
+    lvg::controller_id_request request {}; lvg::feedback_event event {};
+    CHECK(poll_feedback(&f.context, &f.owner, request, &event) == STATUS_DEVICE_REMOVED);
+    CHECK(poll_feedback(&f.context, &f.stranger, request, &event) == STATUS_ACCESS_DENIED);
+    CHECK(evt_d0_exit(&f.device, 0) == STATUS_SUCCESS); CHECK(deletes == 1);
+    CHECK(evt_d0_entry(&f.device, 0) == STATUS_SUCCESS);
+    lvg::create_controller_request steal {}; steal.requested_profile = profile;
+    CHECK(create_controller(&f.context, &f.stranger, steal) == STATUS_DEVICE_BUSY);
+    CHECK(f.create(profile) == STATUS_SUCCESS); CHECK(creates == 2);
+    on_delete = {};
+  }
+  {
+    fixture f; CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+    evt_d0_exit(&f.device, 0); evt_file_close(&f.owner);
+    CHECK(f.context.controllers[0].state == slot_state::empty);
+    CHECK(deletes == 1);
+  }
+  for (int failure = 0; failure < 6; ++failure) {
+    fixture f;
+    if (failure == 0) fake_cm_size_result = CR_FAILURE;
+    if (failure == 1) fake_cm_list_result = CR_FAILURE;
+    if (failure == 2) fake_cm_list_result = CR_BUFFER_SMALL;
+    if (failure == 3) fake_heap_failure = true;
+    if (failure == 4) fake_cm_ids = {L'x'};
+    if (failure == 5) fake_cm_ids = {L'x', L'x'};
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+  {
+    fixture f;
+    wchar_t instance[128] {}; format_instance_id(instance, RTL_NUMBER_OF(instance), 0);
+    std::wstring child = L"HID\\test&"; child += instance;
+    fake_cm_ids.assign(child.begin(), child.end()); fake_cm_ids.push_back(0); fake_cm_ids.push_back(0);
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+    fake_cm_ids = {0, 0}; CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+  }
+  {
+    fixture f;
+    fake_cm_hook = [&] { evt_d0_exit(&f.device, 0); };
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_POWERED_OFF);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+  {
+    fixture f;
+    fake_cm_hook = [&] { reset_slot(&f.context.controllers[0]); };
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--initialization-only") == 0) {
     test_device_add_configures_non_power_managed_filter_queue();
@@ -585,7 +667,7 @@ int main(int argc, char **argv) {
     test_device_add_propagates_queue_creation_failure();
     std::printf("VHF initialization behavior: %d checks, %d failures\n", checks.load(), failures.load());
   } else if (argc == 1) {
-    test_profiles(); test_start_rollback(); test_prestart_failures();
+    test_power_lifecycle(); test_profiles(); test_start_rollback(); test_prestart_failures();
     test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
     std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
   } else {

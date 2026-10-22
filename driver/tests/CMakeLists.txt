@@ -33,6 +33,11 @@ target_include_directories(test_pid_descriptor PRIVATE ../src ../../include)
 add_test(NAME controller_descriptors COMMAND test_pid_descriptor)
 
 if(WIN32)
+    # Manual, opt-in only: this probe suspends the machine. Never a CTest.
+    add_executable(probe_sleep probe_sleep.cpp ../../client/client.cpp)
+    target_compile_features(probe_sleep PRIVATE cxx_std_20)
+    target_include_directories(probe_sleep PRIVATE ../../include)
+    target_link_libraries(probe_sleep PRIVATE setupapi hid cfgmgr32 powrprof wtsapi32 xinput)
     add_executable(probe_ds4_usb probe_ds4_usb.cpp ../../client/client.cpp)
     target_compile_features(probe_ds4_usb PRIVATE cxx_std_20)
     target_include_directories(probe_ds4_usb PRIVATE ../../include)
@@ -68,6 +73,24 @@ if(NOT WIN32)
     target_include_directories(test_profile_identity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/vhf")
 endif()
 
+# Compile the actual manual-probe control flow against inert boundaries. This
+# target cannot invoke Windows power APIs, even on Windows CI.
+set(_sleep_probe_source "${CMAKE_CURRENT_LIST_DIR}/probe_sleep.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_sleep_probe_source}")
+file(READ "${_sleep_probe_source}" _sleep_probe_text)
+string(FIND "${_sleep_probe_text}" "int main(" _sleep_probe_main_offset)
+if(_sleep_probe_main_offset LESS 0)
+    message(FATAL_ERROR "Manual sleep probe main entry point is missing")
+endif()
+string(SUBSTRING "${_sleep_probe_text}" ${_sleep_probe_main_offset} -1 _sleep_probe_main)
+string(REPLACE "int main(" "int probe_main(" _sleep_probe_main "${_sleep_probe_main}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/sleep_probe_main.h" "${_sleep_probe_main}")
+add_executable(test_sleep_probe_cleanup test_sleep_probe_cleanup.cpp)
+target_compile_features(test_sleep_probe_cleanup PRIVATE cxx_std_20)
+target_include_directories(test_sleep_probe_cleanup PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(test_sleep_probe_cleanup PRIVATE Threads::Threads)
+add_test(NAME sleep_probe_cleanup_contract COMMAND test_sleep_probe_cleanup)
+set_tests_properties(sleep_probe_cleanup_contract PROPERTIES TIMEOUT 10)
 # Exercise shipping touch allocation and encoded reports, including ID wrap.
 add_executable(test_playstation_touch test_playstation_touch.cpp
     ../src/dualshock4.cpp ../src/dualsense.cpp)

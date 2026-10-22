@@ -40,3 +40,16 @@ inline constexpr NTSTATUS STATUS_INVALID_BUFFER_SIZE = -11;
 inline constexpr NTSTATUS STATUS_INVALID_HANDLE = -12;
 inline constexpr bool NT_SUCCESS(NTSTATUS status) { return status >= 0; }
 #define RTL_NUMBER_OF(x) (sizeof(x) / sizeof((x)[0]))
+
+// Configuration Manager and clock-free power lifecycle test boundaries.
+#include <cstdlib>
+#include <cwctype>
+inline constexpr NTSTATUS STATUS_DEVICE_REMOVED = -13, STATUS_DEVICE_POWERED_OFF = -14;
+inline bool fake_heap_failure = false;
+inline HANDLE GetProcessHeap() { return nullptr; }
+inline void *HeapAlloc(HANDLE, DWORD, std::size_t bytes) { return fake_heap_failure ? nullptr : std::calloc(1, bytes); }
+inline void HeapFree(HANDLE, DWORD, void *p) { std::free(p); }
+inline int _wcsicmp(const wchar_t *a, const wchar_t *b) {
+  while (*a && std::towlower(*a) == std::towlower(*b)) { ++a; ++b; }
+  return int(std::towlower(*a)) - int(std::towlower(*b));
+}
