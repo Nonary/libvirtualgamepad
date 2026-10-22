@@ -281,7 +281,7 @@ bool enable_shutdown_privilege() {
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
   TOKEN_PRIVILEGES privileges {1};
   privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-  const bool ok = LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME, &privileges.Privileges[0].Luid) &&
+  const bool ok = LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege", &privileges.Privileges[0].Luid) &&
                   AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr) &&
                   GetLastError() == ERROR_SUCCESS;
   CloseHandle(token);
