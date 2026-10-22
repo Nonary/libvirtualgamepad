@@ -67,3 +67,13 @@ if(NOT WIN32)
     target_include_directories(test_pid_descriptor PRIVATE support/vhf)
     target_include_directories(test_profile_identity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/vhf")
 endif()
+
+# Exercise shipping touch allocation and encoded reports, including ID wrap.
+add_executable(test_playstation_touch test_playstation_touch.cpp
+    ../src/dualshock4.cpp ../src/dualsense.cpp)
+target_compile_features(test_playstation_touch PRIVATE cxx_std_20)
+target_include_directories(test_playstation_touch PRIVATE ../src ../../include)
+if(NOT WIN32)
+    target_include_directories(test_playstation_touch PRIVATE support/vhf)
+endif()
+add_test(NAME playstation_touch_contract COMMAND test_playstation_touch)
