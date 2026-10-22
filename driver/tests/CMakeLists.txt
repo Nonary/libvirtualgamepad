@@ -33,6 +33,11 @@ target_include_directories(test_pid_descriptor PRIVATE ../src ../../include)
 add_test(NAME controller_descriptors COMMAND test_pid_descriptor)
 
 if(WIN32)
+    # Manual, opt-in only: this probe suspends the machine. Never a CTest.
+    add_executable(probe_sleep probe_sleep.cpp ../../client/client.cpp)
+    target_compile_features(probe_sleep PRIVATE cxx_std_20)
+    target_include_directories(probe_sleep PRIVATE ../../include)
+    target_link_libraries(probe_sleep PRIVATE setupapi hid cfgmgr32 powrprof wtsapi32 xinput)
     add_executable(probe_ds4_usb probe_ds4_usb.cpp ../../client/client.cpp)
     target_compile_features(probe_ds4_usb PRIVATE cxx_std_20)
     target_include_directories(probe_ds4_usb PRIVATE ../../include)

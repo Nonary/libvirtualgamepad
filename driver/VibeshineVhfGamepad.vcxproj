@@ -88,7 +88,7 @@
       <AdditionalOptions>/permissive- /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>VhfUm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>VhfUm.lib;cfgmgr32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\um\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>

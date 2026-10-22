@@ -315,6 +315,11 @@ static_assert(sizeof(playstation_output_feedback) == 32);
 static_assert(sizeof(playstation_output_feedback) <= sizeof(feedback_event::payload));
 static_assert(sizeof(feedback_event) == 48);
 
+// Controllers do not survive the source device leaving D0 (sleep, hibernate,
+// shutdown): the driver retires its VHF children during D0 exit. Each slot stays owned by its handle, and
+// input/feedback requests then fail with ERROR_DEVICE_REMOVED until the owner
+// destroys it (which succeeds) or creates it again. No wire format changes, so
+// the protocol version does not either.
 inline constexpr DWORD ioctl_query_info =
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA);
 inline constexpr DWORD ioctl_create_controller =
