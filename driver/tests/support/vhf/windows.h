@@ -16,6 +16,7 @@ using PWSTR = wchar_t *;
 using PVOID = void *;
 using HANDLE = void *;
 using BOOLEAN = bool;
+using BOOL = std::int32_t;
 using NTSTATUS = std::int32_t;
 using PDRIVER_OBJECT = void *;
 using PUNICODE_STRING = void *;
@@ -24,6 +25,25 @@ struct GUID {
   std::uint16_t Data2, Data3;
   std::uint8_t Data4[8];
 };
+// POD stand-ins for the user-mode synchronization ABI. The fixture supplies
+// the backing mutex/condition variable through opaque pointers; these are not
+// Windows implementations and make no UMDF runtime qualification claim.
+struct SRWLOCK { void *state; };
+struct CONDITION_VARIABLE { void *state; };
+void InitializeSRWLock(SRWLOCK *lock);
+void InitializeConditionVariable(CONDITION_VARIABLE *condition);
+void AcquireSRWLockExclusive(SRWLOCK *lock);
+void ReleaseSRWLockExclusive(SRWLOCK *lock);
+BOOL SleepConditionVariableSRW(
+  CONDITION_VARIABLE *condition, SRWLOCK *lock, DWORD milliseconds, ULONG flags);
+void WakeAllConditionVariable(CONDITION_VARIABLE *condition);
+void Sleep(DWORD milliseconds);
+LONG InterlockedExchange(volatile LONG *destination, LONG value);
+LONG InterlockedCompareExchange(volatile LONG *destination, LONG exchange, LONG comparand);
+LONG InterlockedIncrement(volatile LONG *destination);
+LONG InterlockedDecrement(volatile LONG *destination);
+inline constexpr DWORD INFINITE = 0xffffffffu;
+inline constexpr ULONG CONDITION_VARIABLE_LOCKMODE_SHARED = 0x1;
 inline constexpr bool TRUE = true, FALSE = false;
 inline constexpr NTSTATUS STATUS_SUCCESS = 0;
 inline constexpr NTSTATUS STATUS_INVALID_PARAMETER = -1;
@@ -31,6 +51,7 @@ inline constexpr NTSTATUS STATUS_NOT_SUPPORTED = -2;
 inline constexpr NTSTATUS STATUS_DEVICE_NOT_READY = -3;
 inline constexpr NTSTATUS STATUS_DEVICE_BUSY = -4;
 inline constexpr NTSTATUS STATUS_CANCELLED = -5;
+inline constexpr NTSTATUS STATUS_INSUFFICIENT_RESOURCES = -15;
 inline constexpr NTSTATUS STATUS_ACCESS_DENIED = -6;
 inline constexpr NTSTATUS STATUS_NOT_FOUND = -7;
 inline constexpr NTSTATUS STATUS_INVALID_DEVICE_REQUEST = -8;

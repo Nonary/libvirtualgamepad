@@ -18,6 +18,13 @@ struct fake_wdf_object {
   std::mutex mutex;
   std::atomic<int> waiters {};
   bool armed {};
+  // Deterministic METHOD_BUFFERED boundary for actual dispatcher fixtures.
+  void *input_buffer {}, *output_buffer {};
+  size_t input_length {}, output_length {};
+  NTSTATUS input_status {STATUS_SUCCESS}, output_status {STATUS_SUCCESS};
+  NTSTATUS completion_status {STATUS_NOT_SUPPORTED};
+  ULONG_PTR information {};
+  int completions {};
 };
 using WDFOBJECT = fake_wdf_object *;
 using WDFDEVICE = WDFOBJECT;
@@ -34,8 +41,10 @@ using EVT_WDF_DRIVER_DEVICE_ADD = NTSTATUS(WDFDRIVER, PWDFDEVICE_INIT);
 using EVT_WDF_DEVICE_PREPARE_HARDWARE = NTSTATUS(WDFDEVICE, WDFCMRESLIST, WDFCMRESLIST);
 using EVT_WDF_DEVICE_RELEASE_HARDWARE = NTSTATUS(WDFDEVICE, WDFCMRESLIST);
 using EVT_WDF_OBJECT_CONTEXT_CLEANUP = void(WDFOBJECT);
+using EVT_WDF_OBJECT_CONTEXT_DESTROY = void(WDFOBJECT);
 using EVT_WDF_DEVICE_FILE_CREATE = void(WDFDEVICE, WDFREQUEST, WDFFILEOBJECT);
 using EVT_WDF_FILE_CLOSE = void(WDFFILEOBJECT);
+using EVT_WDF_FILE_CLEANUP = void(WDFFILEOBJECT);
 using EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL = void(WDFQUEUE, WDFREQUEST, size_t, size_t, ULONG);
 using EVT_WDF_TIMER = void(WDFTIMER);
 inline thread_local std::vector<WDFWAITLOCK> fake_held_locks;
@@ -76,26 +85,48 @@ inline WDFDEVICE WdfFileObjectGetDevice(WDFFILEOBJECT o) { return o->parent; }
 inline WDFDEVICE WdfIoQueueGetDevice(WDFQUEUE o) { return o->parent; }
 inline WDFFILEOBJECT WdfRequestGetFileObject(WDFREQUEST o) { return o->parent; }
 
-// Request marshalling remains compile-only and fails closed. Initialization
-// below can run against test-owned WDF objects; it does not model OS power
-// transitions, automatic object deletion, request marshalling, or IRQL.
-inline NTSTATUS WdfRequestRetrieveInputBuffer(WDFREQUEST, size_t, PVOID *, size_t *) { return STATUS_NOT_SUPPORTED; }
-inline NTSTATUS WdfRequestRetrieveOutputBuffer(WDFREQUEST, size_t, PVOID *, size_t *) { return STATUS_NOT_SUPPORTED; }
-inline void WdfRequestComplete(WDFREQUEST, NTSTATUS) {}
-inline void WdfRequestCompleteWithInformation(WDFREQUEST, NTSTATUS, ULONG_PTR) {}
+// Deterministic raw request boundary; this does not model Windows/UMDF
+// marshalling, OS power transitions, automatic object deletion, or IRQL.
+inline NTSTATUS WdfRequestRetrieveInputBuffer(WDFREQUEST r, size_t minimum, PVOID *out, size_t *length) {
+  if (!r || !out) return STATUS_INVALID_PARAMETER;
+  if (!NT_SUCCESS(r->input_status)) return r->input_status;
+  if (!r->input_buffer || r->input_length < minimum) return STATUS_BUFFER_TOO_SMALL;
+  *out = r->input_buffer; if (length) *length = r->input_length; return STATUS_SUCCESS;
+}
+inline NTSTATUS WdfRequestRetrieveOutputBuffer(WDFREQUEST r, size_t minimum, PVOID *out, size_t *length) {
+  if (!r || !out) return STATUS_INVALID_PARAMETER;
+  if (!NT_SUCCESS(r->output_status)) return r->output_status;
+  if (!r->output_buffer || r->output_length < minimum) return STATUS_BUFFER_TOO_SMALL;
+  *out = r->output_buffer; if (length) *length = r->output_length; return STATUS_SUCCESS;
+}
+inline void WdfRequestComplete(WDFREQUEST r, NTSTATUS status) {
+  if (!r) return;
+  ++r->completions; r->completion_status = status; r->information = 0;
+}
+inline void WdfRequestCompleteWithInformation(WDFREQUEST r, NTSTATUS status, ULONG_PTR information) {
+  WdfRequestComplete(r, status); if (r) r->information = information;
+}
 struct WDF_FILEOBJECT_CONFIG {
   EVT_WDF_DEVICE_FILE_CREATE *EvtDeviceFileCreate {};
   EVT_WDF_FILE_CLOSE *EvtFileClose {};
+  EVT_WDF_FILE_CLEANUP *EvtFileCleanup {};
+  bool AutoForwardCleanupClose {true};
 };
-inline void WDF_FILEOBJECT_CONFIG_INIT(WDF_FILEOBJECT_CONFIG *c, EVT_WDF_DEVICE_FILE_CREATE *create, EVT_WDF_FILE_CLOSE *close, void *) {
-  *c = {create, close};
+inline void WDF_FILEOBJECT_CONFIG_INIT(
+  WDF_FILEOBJECT_CONFIG *c,
+  EVT_WDF_DEVICE_FILE_CREATE *create,
+  EVT_WDF_FILE_CLOSE *close,
+  EVT_WDF_FILE_CLEANUP *cleanup) {
+  *c = {create, close, cleanup, true};
 }
 struct WDF_OBJECT_ATTRIBUTES {
   WDFOBJECT ParentObject {};
   EVT_WDF_OBJECT_CONTEXT_CLEANUP *EvtCleanupCallback {};
+  EVT_WDF_OBJECT_CONTEXT_DESTROY *EvtDestroyCallback {};
+  size_t ContextSize {};
 };
 inline void WDF_OBJECT_ATTRIBUTES_INIT(WDF_OBJECT_ATTRIBUTES *a) { *a = {}; }
-#define WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(a, type) WDF_OBJECT_ATTRIBUTES_INIT(a)
+#define WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(a, type) do { WDF_OBJECT_ATTRIBUTES_INIT(a); (a)->ContextSize = sizeof(type); } while (false)
 using WDF_POWER_DEVICE_STATE = int;
 using EVT_WDF_DEVICE_D0_ENTRY = NTSTATUS(WDFDEVICE, WDF_POWER_DEVICE_STATE);
 using EVT_WDF_DEVICE_D0_EXIT = NTSTATUS(WDFDEVICE, WDF_POWER_DEVICE_STATE);
@@ -138,6 +169,7 @@ struct fake_wdf_initialization {
   WDFQUEUE queue {};
   EVT_WDF_DRIVER_DEVICE_ADD *add {};
   WDF_FILEOBJECT_CONFIG files {};
+  size_t file_context_size {};
   WDF_PNPPOWER_EVENT_CALLBACKS pnp {};
   WDF_IO_QUEUE_CONFIG queue_config {};
   EVT_WDF_OBJECT_CONTEXT_CLEANUP *target_cleanup {};
@@ -149,8 +181,11 @@ inline fake_wdf_initialization *fake_initialization {};
 inline void WdfFdoInitSetFilter(PWDFDEVICE_INIT) {
   if (fake_initialization) fake_initialization->filter = true;
 }
-inline void WdfDeviceInitSetFileObjectConfig(PWDFDEVICE_INIT, WDF_FILEOBJECT_CONFIG *c, WDF_OBJECT_ATTRIBUTES *) {
-  if (fake_initialization) fake_initialization->files = *c;
+inline void WdfDeviceInitSetFileObjectConfig(PWDFDEVICE_INIT, WDF_FILEOBJECT_CONFIG *c, WDF_OBJECT_ATTRIBUTES *a) {
+  if (fake_initialization) {
+    fake_initialization->files = *c;
+    fake_initialization->file_context_size = a->ContextSize;
+  }
 }
 inline void WdfDeviceInitSetPnpPowerEventCallbacks(PWDFDEVICE_INIT, WDF_PNPPOWER_EVENT_CALLBACKS *p) {
   if (fake_initialization) fake_initialization->pnp = *p;
@@ -190,6 +225,8 @@ inline NTSTATUS WdfDeviceCreateDeviceInterface(WDFDEVICE, const GUID *, void *) 
   fake_initialization->interface_created = true;
   return STATUS_SUCCESS;
 }
+inline NTSTATUS WdfObjectCreate(WDF_OBJECT_ATTRIBUTES *, WDFOBJECT *) { return STATUS_NOT_SUPPORTED; }
+inline void WdfObjectDelete(WDFOBJECT) {}
 inline NTSTATUS WdfIoQueueCreate(WDFDEVICE device, WDF_IO_QUEUE_CONFIG *c, void *, WDFQUEUE *queue) {
   if (!fake_initialization) return STATUS_NOT_SUPPORTED;
   auto &f = *fake_initialization;

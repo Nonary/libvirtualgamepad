@@ -72,3 +72,36 @@ if(NOT WIN32)
     target_include_directories(test_pid_descriptor PRIVATE support/vhf)
     target_include_directories(test_profile_identity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/vhf")
 endif()
+
+# The default-OFF source stage does not advertise a shipping capability.
+# This exercises actual FIFO/encoder/lifecycle code portably.
+add_executable(test_keyboard_mouse test_keyboard_mouse.cpp ../src/keyboard_mouse.cpp)
+target_compile_features(test_keyboard_mouse PRIVATE cxx_std_20)
+target_include_directories(test_keyboard_mouse PRIVATE ../src ../../include)
+add_test(NAME keyboard_mouse_producer_core COMMAND test_keyboard_mouse)
+
+# Source-stage actual UMDF driver/client bodies at deterministic boundaries.
+# Fixture-only synthetic IDs are not native/project identity qualification.
+add_executable(test_keyboard_mouse_transport test_keyboard_mouse_transport.cpp
+    ../src/keyboard_mouse.cpp ../src/pid_ff.cpp ../src/profile.cpp ../src/report_pump.cpp
+    ../src/dualshock4.cpp ../src/dualsense.cpp ../src/switch_pro.cpp
+    ../src/xbox_one.cpp ../src/xbox_series.cpp)
+target_compile_features(test_keyboard_mouse_transport PRIVATE cxx_std_20)
+target_compile_definitions(test_keyboard_mouse_transport PRIVATE
+    LVG_ENABLE_KEYBOARD_MOUSE_SOURCE=1 LVG_KM_NATIVE_CONTRACT_ACKNOWLEDGED=1
+    LVG_KM_VENDOR_ID=65535 LVG_KM_PRODUCT_ID=65534 LVG_KM_TEST_HOOKS=1)
+target_include_directories(test_keyboard_mouse_transport BEFORE PRIVATE
+    support/client support/vhf ../src ../../include)
+target_link_libraries(test_keyboard_mouse_transport PRIVATE Threads::Threads)
+add_test(NAME keyboard_mouse_source_transport COMMAND test_keyboard_mouse_transport)
+add_test(NAME keyboard_mouse_power_lifecycle COMMAND test_keyboard_mouse_transport --power-only)
+set_tests_properties(keyboard_mouse_source_transport keyboard_mouse_power_lifecycle PROPERTIES TIMEOUT 30)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Both tests include the unchanged Windows driver body. Its MS pool-tag
+    # literal and zero-reset of a trivially copyable controller_slot trigger
+    # GCC diagnostics; fixture static_asserts reject resource-owning replacements.
+    # The new endpoint is explicitly placement-constructed before publication.
+    target_compile_options(test_vhf_lifecycle PRIVATE -Wno-multichar -Wno-class-memaccess)
+    target_compile_options(test_keyboard_mouse_transport PRIVATE -Wno-multichar -Wno-class-memaccess)
+endif()
