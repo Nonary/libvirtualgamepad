@@ -91,3 +91,12 @@ target_include_directories(test_sleep_probe_cleanup PRIVATE "${CMAKE_CURRENT_BIN
 target_link_libraries(test_sleep_probe_cleanup PRIVATE Threads::Threads)
 add_test(NAME sleep_probe_cleanup_contract COMMAND test_sleep_probe_cleanup)
 set_tests_properties(sleep_probe_cleanup_contract PROPERTIES TIMEOUT 10)
+# Exercise shipping touch allocation and encoded reports, including ID wrap.
+add_executable(test_playstation_touch test_playstation_touch.cpp
+    ../src/dualshock4.cpp ../src/dualsense.cpp)
+target_compile_features(test_playstation_touch PRIVATE cxx_std_20)
+target_include_directories(test_playstation_touch PRIVATE ../src ../../include)
+if(NOT WIN32)
+    target_include_directories(test_playstation_touch PRIVATE support/vhf)
+endif()
+add_test(NAME playstation_touch_contract COMMAND test_playstation_touch)
