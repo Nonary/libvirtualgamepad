@@ -4,21 +4,26 @@ Scope: optional producer prerequisite for Vibepollo #602, stacked on
 libvirtualgamepad PR8. Initial base was
 `fd67a37554f17fce3c6ad586f6acb20f7a48cb8d`; the dependency was then advanced to
 `3dc2bb48667ae898a337691828f07a6e0ab216ba`, incorporating PR8's independent
-one-line Windows probe wide-string repair. No probe or PR8 branch was edited by
-this producer adaptation. This record is source/portable evidence, not native
+one-line Windows probe wide-string repair. The published history then merged
+PR8 `630631b8c118e3d989a3d305435aba6146d2508b`, including the scope-exit
+probe cleanup and unchanged PR7 touch fix from main
+`30bc8d8b840ec0cc4479e446ddb6e4c7e9fe8c60`. Only additive test-CMake
+entries needed conflict reconciliation; KM behavior was unchanged. No probe or
+PR8 branch was edited by this producer adaptation. This record is source/portable evidence, not native
 qualification or independent-review clearance.
 
 ## Executed checks (2026-10-22)
 
-- GCC 14.2, C++20, CMake 4.4.4 on Linux: all 9 CTests pass in Debug and Release.
+- GCC 14.2, C++20, CMake 4.4.4 on Linux: all 11 CTests pass in Debug and Release.
 - Actual driver/client KM transport: 3,023 assertions pass, including the
   power-specific subset's 996 assertions. Pure producer core: 384 assertions.
   The existing controller lifecycle test passes with the added early-PnP
   cancellation expectations and default-OFF IOCTL refusal checks.
-- ASan + UBSan: all 9 CTests pass with `ASAN_OPTIONS=detect_leaks=0`.
+- ASan + UBSan: all 11 CTests pass with `ASAN_OPTIONS=detect_leaks=0`.
   LeakSanitizer was attempted but cannot run under this executor's ptrace
   boundary; leak checking is not claimed.
-- Focused controller lifecycle/initialization and KM core/transport targets
+- Focused controller lifecycle/initialization, KM core/transport, probe cleanup
+  and touch targets
   compile and pass with `-Wall -Wextra -Werror`, retaining the existing targeted
   suppressions for the driver pool-tag literal and trivially-copyable reset.
   An extra strict-warning aggregate build did not pass because unchanged
@@ -30,6 +35,10 @@ qualification or independent-review clearance.
   acknowledgement without an identity, fails compilation as intended.
 - Release controller lifecycle, KM source transport and KM power lifecycle each
   pass 50 consecutive CTest runs (150 executions total).
+- The initial published head `372ad1d090a3e1a2deef8ceb850e5b09daf99e29`
+  passed the [Windows-2022 CMake workflow](https://github.com/Nonary/libvirtualgamepad/actions/runs/39828162688).
+  This compiled the manual probes/client against the Windows SDK and ran the
+  in-process contracts, not native UMDF/WDK driver or hardware qualification.
 - `git diff --check` passes.
 
 Reproduce portable checks without loading/installing anything:
@@ -69,7 +78,8 @@ only to inject deliberate mutations, not as a substitute for runtime behavior.
 
 ## Still unverified
 
-No Windows SDK/WDK, native UMDF/VhfUm build, hardware, VM, real suspend/hibernate,
+The local executor has no Windows SDK/WDK. No native UMDF/VhfUm driver build,
+hardware, VM, real suspend/hibernate,
 Driver Verifier, callback scheduler, held-input removal, signed package, accepted
 VID/PID, native absolute binding or end-to-end host backend was available/run.
 The fixture assumes ready-callback entry has quiesced by VhfDelete(TRUE) return;

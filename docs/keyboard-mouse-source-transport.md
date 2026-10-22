@@ -15,7 +15,11 @@ The recovered producer packet is the diff from
 This adaptation started from PR8 head
 `fd67a37554f17fce3c6ad586f6acb20f7a48cb8d` and was rebased onto its narrow
 probe repair, `3dc2bb48667ae898a337691828f07a6e0ab216ba`, not onto the
-historical parent.
+historical parent. The published producer history then incorporated PR8 head
+`630631b8c118e3d989a3d305435aba6146d2508b` (probe scope-exit cleanup plus
+main `30bc8d8b840ec0cc4479e446ddb6e4c7e9fe8c60` / unchanged merged PR7).
+Only additive CMake test entries needed conflict reconciliation; KM behavior
+was unchanged by that dependency update.
 The packet could not safely be applied unchanged: it admitted KM work while
 PR8's device was outside D0 and omitted the KM child from D0 retirement.
 

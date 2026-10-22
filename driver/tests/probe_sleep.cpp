@@ -46,6 +46,7 @@
 
 #include "libvirtualgamepad/client.h"
 #include "sleep_churn_progress.h"
+#include "scope_exit.h"
 
 namespace {
 
@@ -322,6 +323,20 @@ int main(int argc, char **argv) {
   }
 
   run_state run;
+  HPOWERNOTIFY registration = nullptr;
+  HANDLE timer = nullptr;
+  // Declared after run: callbacks and churn must stop before their state dies.
+  scope_exit cleanup {[&] {
+    run.churn_stop = true;
+    if (registration != nullptr) PowerUnregisterSuspendResumeNotification(registration);
+    if (run.churn.joinable()) run.churn.join();
+    if (timer != nullptr) {
+      CancelWaitableTimer(timer);
+      CloseHandle(timer);
+    }
+    for (std::uint32_t id = 0; id < run.pads; ++id) std::ignore = run.client.destroy_controller(id);
+    if (log_file != nullptr) { CloseHandle(log_file); log_file = nullptr; }
+  }};
   run.aware = mode == "aware";
   run.pads = mode == "none" ? 0 : static_cast<std::uint32_t>(std::size(k_long_lived));
   line("INFO", "mode=%s wake=%d s, console session %s", mode.c_str(), wake_seconds,
@@ -339,8 +354,9 @@ int main(int argc, char **argv) {
   Sleep(1000);  // Let the HID children start and xinputhid attach.
 
   DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS subscribe {on_power, &run};
-  HPOWERNOTIFY registration = nullptr;
-  PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, &subscribe, &registration);
+  status = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, &subscribe, &registration);
+  check(status == ERROR_SUCCESS, "register power notifications");
+  if (status != ERROR_SUCCESS) return 1;
 
   const bool sleep = mode != "awake";
   if (sleep && !enable_shutdown_privilege()) {
@@ -348,7 +364,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (sleep) {
-    const HANDLE timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
+    timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
     LARGE_INTEGER due {};
     due.QuadPart = -static_cast<LONGLONG>(wake_seconds) * 10'000'000;
     if (timer == nullptr || !SetWaitableTimer(timer, &due, 0, nullptr, nullptr, TRUE)) {
@@ -359,8 +375,12 @@ int main(int argc, char **argv) {
     const auto before_sleep = steady::now();
     const BOOLEAN slept = SetSuspendState(FALSE, FALSE, FALSE);
     line("INFO", "SetSuspendState returned %d after %.1f s", slept, ms_since(before_sleep) / 1000);
+    check(slept != FALSE, "SetSuspendState");
+    if (!slept) return 1;
     wait_for(5000, [&] { return run.resumes > 0; });
+    CancelWaitableTimer(timer);
     CloseHandle(timer);
+    timer = nullptr;
     check(run.suspends > 0 && run.resumes > 0, "suspend and resume");
   }
   const auto resumed = steady::now();
@@ -433,9 +453,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  for (std::uint32_t id = 0; id < run.pads; ++id) std::ignore = run.client.destroy_controller(id);
-  if (registration != nullptr) PowerUnregisterSuspendResumeNotification(registration);
   line("INFO", "%d failure(s)", failures);
-  if (log_file != nullptr) CloseHandle(log_file);
   return failures == 0 ? 0 : 1;
 }

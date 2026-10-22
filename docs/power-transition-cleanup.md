@@ -17,3 +17,5 @@ On Windows, build driver/tests with CMake; probe_sleep is a manual executable, n
 Usage: probe_sleep awake|none|idle|churn|aware [wake-seconds] [log-file]. Start with awake. Other modes require elevation for the sleep privilege. The churn/aware check now requires a successful create, input submission and destroy cycle that started after a resume event; pre-sleep cycles cannot pass it.
 
 Portable tests cannot validate WDK compilation, actual D0/IRP ordering, native probe compilation, S3 behavior or a Vhf.sys watchdog crash. These remain explicit native validation requirements; this source change is not proof that the reported kernel sleep crash is fixed.
+
+The manual probe owns all main-path resources with scoped cleanup, including startup failures. A separate inert test compiles its actual main function against fake OS/client boundaries and injects connection, controller creation, notification registration, privilege, timer creation/arming and suspend failures. It verifies stop/join and resource release without accessing Windows power APIs. This is the only probe-related CTest; the real probe remains manual.
