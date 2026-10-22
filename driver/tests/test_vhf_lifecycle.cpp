@@ -3,6 +3,7 @@
 // Execute the complete shipping driver body, with real profile/pump code and
 // modeled OS boundaries. This does not install a driver or validate WDK/IRQL.
 #include "../src/driver.cpp"
+#include "libvirtualgamepad/keyboard_mouse.h"
 #include "sleep_churn_progress.h"
 
 #include <array>
@@ -284,6 +285,26 @@ void test_device_add_propagates_queue_creation_failure() {
   CHECK(f.add_status == STATUS_ACCESS_DENIED);
 }
 
+void test_disabled_keyboard_mouse() {
+  static_assert(LVG_ENABLE_KEYBOARD_MOUSE_SOURCE == 0);
+  static_assert(LVG_KM_NATIVE_CONTRACT_ACKNOWLEDGED == 0);
+  fixture f;
+  fake_wdf_object queue; queue.parent = &f.device;
+  for (DWORD function = 0x820; function <= 0x827; ++function) {
+    auto input = lvg::km::request<lvg::km::keyboard_request>();
+    lvg::km::query_response output {};
+    fake_wdf_object request; request.parent = &f.owner;
+    request.input_buffer = &input; request.input_length = sizeof(input);
+    request.output_buffer = &output; request.output_length = sizeof(output);
+    evt_io_device_control(&queue, &request, sizeof(output), sizeof(input),
+      CTL_CODE(FILE_DEVICE_UNKNOWN, function, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA));
+    CHECK(request.completions == 1);
+    CHECK(request.completion_status == STATUS_INVALID_DEVICE_REQUEST);
+    CHECK(request.information == 0);
+  }
+  CHECK(creates == 0);
+}
+
 void test_profiles() {
   for (auto profile : profiles) {
     fixture f;
@@ -521,22 +542,31 @@ void test_release_restart() {
 }
 
 void test_concurrent_teardown() {
-  for (int mode = 0; mode < 3; ++mode) {
+  for (int mode = 0; mode < 4; ++mode) {
     fixture f;
     std::future<void> teardown;
     on_start = [&](VHFHANDLE h) {
       teardown = std::async(std::launch::async, [&] {
         if (mode == 0) evt_file_close(&f.owner);
         else if (mode == 1) static_cast<void>(evt_release_hardware(&f.device, nullptr));
-        else evt_vhf_target_cleanup(&f.target);
+        else if (mode == 2) evt_vhf_target_cleanup(&f.target);
+        else static_cast<void>(evt_d0_exit(&f.device, 0));
       });
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
       while (f.lifetime.waiters == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
       CHECK(f.lifetime.waiters == 1);
       CHECK(teardown.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-      check_initial_callbacks(h); // No callback takes the blocked outer gate.
+      if (mode == 0) {
+        check_initial_callbacks(h); // Ordinary file close is serialized.
+      } else {
+        // PnP intent is visible before it can acquire the blocked outer gate.
+        CHECK(input(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+        CHECK(output(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+        const int before = submits;
+        ready(h); CHECK(submits == before);
+      }
     };
-    CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+    CHECK(f.create(lvg::profile::dualsense) == (mode == 0 ? STATUS_SUCCESS : STATUS_CANCELLED));
     teardown.get();
     CHECK(deletes == 1); CHECK(f.context.controllers[0].state == slot_state::empty);
   }
@@ -667,6 +697,7 @@ int main(int argc, char **argv) {
     test_device_add_propagates_queue_creation_failure();
     std::printf("VHF initialization behavior: %d checks, %d failures\n", checks.load(), failures.load());
   } else if (argc == 1) {
+    test_disabled_keyboard_mouse();
     test_power_lifecycle(); test_profiles(); test_start_rollback(); test_prestart_failures();
     test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
     std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
