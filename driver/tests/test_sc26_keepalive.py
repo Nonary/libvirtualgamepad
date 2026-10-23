@@ -85,7 +85,7 @@ struct controller_slot {device_context* parent=nullptr; slot_state state=slot_st
  bool have_last_input=true; VHFHANDLE vhf=(void*)1; int last_input=42; std::uint8_t sc26_wire_sequence=0;
  lvg::driver::fake_pump pump; lvg::driver::sc26_state sc26; int submits_in_flight=0; HID_XFER_PACKET read_transfer{};
  lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::switch_state switch_pro;};
-struct device_context {controller_slot controllers[2]; bool stopping=false,sc26_timer_running=true,sc26_timer_parked=false;
+struct device_context {controller_slot controllers[2]; bool stopping=false,powered=true,sc26_timer_running=true,sc26_timer_parked=false;
  HANDLE sc26_keepalive_timer=(void*)1,sc26_keepalive_thread=nullptr,sc26_keepalive_stop=(void*)1;
  // The production admission gate (accepts_vhf_callbacks) reads the device through the slot.
  device_context(){for(auto& s:controllers)s.parent=this;}};

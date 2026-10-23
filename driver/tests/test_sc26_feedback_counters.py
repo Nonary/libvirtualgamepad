@@ -78,6 +78,7 @@ using ULONG=std::uint32_t; using UCHAR=std::uint8_t; using PUCHAR=std::uint8_t*;
 #define STATUS_NOT_FOUND (-2)
 #define STATUS_ACCESS_DENIED (-3)
 #define STATUS_DEVICE_NOT_READY (-4)
+#define STATUS_DEVICE_REMOVED (-13)
 #define STATUS_NO_MORE_ENTRIES (-5)
 #define STATUS_INVALID_DEVICE_REQUEST (-6)
 #define NT_SUCCESS(s) ((s)==0)
@@ -86,7 +87,7 @@ using PHID_XFER_PACKET = HID_XFER_PACKET*;
 bool locked=false; int completions=0; NTSTATUS last_completion=99; std::uint8_t next_chunk=0;
 void VhfAsyncOperationComplete(VHFOPERATIONHANDLE h, NTSTATUS s){ assert(h==(void*)7); ++completions; last_completion=s; }
 // PRODUCTION_CONSTANTS
-enum class slot_state : std::uint8_t { empty, starting, active, stopping };
+enum class slot_state : std::uint8_t { empty, starting, active, stopping, lost };
 constexpr std::uint8_t k_pid_create_new_effect_report_id = 0x1B;
 struct pid_create_new_effect_report { std::uint8_t id; };
 template<class report_t> bool read_pid_report(const PHID_XFER_PACKET, report_t*) { return false; }
@@ -118,8 +119,9 @@ struct controller_slot {
  lvg::feedback_event settings_queue[k_settings_queue_capacity]; std::uint8_t settings_head; std::uint8_t settings_count;
  std::uint32_t haptic_evicted; std::uint32_t settings_evicted;
  bool force_feedback; lvg::driver::ds4_state ds4; lvg::driver::ds5_state ds5; lvg::driver::sc26_state sc26;
- lvg::driver::fake_pump pump; fake_pid pid; };
-struct device_context { bool stopping; controller_slot controllers[lvg::k_max_controllers]; };
+ lvg::driver::fake_pump pump; fake_pid pid; std::uint64_t generation; };
+// The device is powered throughout: accepts_vhf_callbacks() admits every active slot here.
+struct device_context { bool stopping; bool powered = true; controller_slot controllers[lvg::k_max_controllers]; };
 void lock_context(device_context*){ assert(!locked); locked=true; }
 void unlock_context(device_context*){ assert(locked); locked=false; }
 '''
@@ -188,6 +190,7 @@ int main(){ int failures=0;
 signatures = [
  '[[nodiscard]] bool accepts_vhf_callbacks(const controller_slot &slot) noexcept',
  '[[nodiscard]] bool is_owned_by(\n  const controller_slot &slot,\n  const WDFFILEOBJECT owner) noexcept',
+ '[[nodiscard]] NTSTATUS inactive_controller_status(\n  const controller_slot &slot,\n  const WDFFILEOBJECT owner) noexcept',
  'void reset_slot(controller_slot *slot) noexcept',
  'void fill_query_info(lvg::query_info_response *const output) noexcept',
  '[[nodiscard]] lvg::feedback_counters feedback_counters_of(const controller_slot &slot) noexcept',
