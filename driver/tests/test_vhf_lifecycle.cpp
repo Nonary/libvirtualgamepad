@@ -3,6 +3,8 @@
 // Execute the complete shipping driver body, with real profile/pump code and
 // modeled OS boundaries. This does not install a driver or validate WDK/IRQL.
 #include "../src/driver.cpp"
+#include "libvirtualgamepad/keyboard_mouse.h"
+#include "sleep_churn_progress.h"
 
 #include <array>
 #include <chrono>
@@ -10,6 +12,10 @@
 #include <memory>
 #include <thread>
 #include <vector>
+
+// The Steam Controller keep-alive worker never starts under this fixture (handle
+// creation fails closed in support/vhf/windows.h); closing its null handles is a no-op.
+BOOL CloseHandle(HANDLE) { return TRUE; }
 
 namespace {
 std::atomic<int> checks {}, failures {};
@@ -118,6 +124,9 @@ struct fixture {
     fake_missing_file = false;
     creates = starts = deletes = submits = fake_opens = fake_closes = 0;
     handles.clear();
+    fake_cm_ids = {0, 0}; fake_cm_queries = 0; fake_cm_hook = {};
+    fake_cm_size_result = fake_cm_list_result = CR_SUCCESS; fake_heap_failure = false;
+    context.powered = true;
     device.context = &context; target.context = &target_data;
     target_data.device = &context;
     owner.parent = stranger.parent = timer.parent = &device;
@@ -225,6 +234,7 @@ void test_initialized_device_release_restart_and_cleanup() {
   CHECK(!f.context.vhf_target_open);
   CHECK(fake_opens == 0);
   CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(fake_opens == 1);
   on_start = check_initial_callbacks;
   for (std::uint32_t n = 0; n < profiles.size(); ++n) CHECK(f.create(profiles[n], n) == STATUS_SUCCESS);
@@ -241,6 +251,7 @@ void test_initialized_device_release_restart_and_cleanup() {
   for (auto &slot : f.context.controllers) CHECK(slot.state == slot_state::empty);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_NOT_READY);
   CHECK(pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(fake_opens == 2);
   CHECK(!f.context.stopping);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
@@ -265,6 +276,7 @@ void test_device_add_without_optional_timer() {
   CHECK(f.initialization.pnp.EvtDeviceReleaseHardware != nullptr);
   if (!f.initialization.pnp.EvtDevicePrepareHardware || !f.initialization.pnp.EvtDeviceReleaseHardware) return;
   CHECK(f.initialization.pnp.EvtDevicePrepareHardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(f.initialization.pnp.EvtDeviceD0Entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
   CHECK(f.initialization.pnp.EvtDeviceReleaseHardware(&f.device, nullptr) == STATUS_SUCCESS);
   CHECK(deletes == 1);
@@ -275,6 +287,26 @@ void test_device_add_propagates_queue_creation_failure() {
   initialized_fixture f(STATUS_SUCCESS, STATUS_ACCESS_DENIED);
   CHECK(f.initialization.queue_creates == 1);
   CHECK(f.add_status == STATUS_ACCESS_DENIED);
+}
+
+void test_disabled_keyboard_mouse() {
+  static_assert(LVG_ENABLE_KEYBOARD_MOUSE_SOURCE == 0);
+  static_assert(LVG_KM_NATIVE_CONTRACT_ACKNOWLEDGED == 0);
+  fixture f;
+  fake_wdf_object queue; queue.parent = &f.device;
+  for (DWORD function = 0x820; function <= 0x827; ++function) {
+    auto input = lvg::km::request<lvg::km::keyboard_request>();
+    lvg::km::query_response output {};
+    fake_wdf_object request; request.parent = &f.owner;
+    request.input_buffer = &input; request.input_length = sizeof(input);
+    request.output_buffer = &output; request.output_length = sizeof(output);
+    evt_io_device_control(&queue, &request, sizeof(output), sizeof(input),
+      CTL_CODE(FILE_DEVICE_UNKNOWN, function, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA));
+    CHECK(request.completions == 1);
+    CHECK(request.completion_status == STATUS_INVALID_DEVICE_REQUEST);
+    CHECK(request.information == 0);
+  }
+  CHECK(creates == 0);
 }
 
 void test_profiles() {
@@ -500,6 +532,7 @@ void test_release_restart() {
   for (auto &slot : f.context.controllers) CHECK(slot.state == slot_state::empty);
   CHECK(!f.timer.armed); CHECK(!f.context.vhf_target_open);
   CHECK(evt_prepare_hardware(&f.device, nullptr, nullptr) == STATUS_SUCCESS);
+  CHECK(evt_d0_entry(&f.device, 0) == STATUS_SUCCESS);
   CHECK(!f.context.stopping); CHECK(fake_opens == 2);
   CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
   fake_close_hook = {};
@@ -513,22 +546,31 @@ void test_release_restart() {
 }
 
 void test_concurrent_teardown() {
-  for (int mode = 0; mode < 3; ++mode) {
+  for (int mode = 0; mode < 4; ++mode) {
     fixture f;
     std::future<void> teardown;
     on_start = [&](VHFHANDLE h) {
       teardown = std::async(std::launch::async, [&] {
         if (mode == 0) evt_file_close(&f.owner);
         else if (mode == 1) static_cast<void>(evt_release_hardware(&f.device, nullptr));
-        else evt_vhf_target_cleanup(&f.target);
+        else if (mode == 2) evt_vhf_target_cleanup(&f.target);
+        else static_cast<void>(evt_d0_exit(&f.device, 0));
       });
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
       while (f.lifetime.waiters == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
       CHECK(f.lifetime.waiters == 1);
       CHECK(teardown.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
-      check_initial_callbacks(h); // No callback takes the blocked outer gate.
+      if (mode == 0) {
+        check_initial_callbacks(h); // Ordinary file close is serialized.
+      } else {
+        // PnP intent is visible before it can acquire the blocked outer gate.
+        CHECK(input(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+        CHECK(output(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+        const int before = submits;
+        ready(h); CHECK(submits == before);
+      }
     };
-    CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+    CHECK(f.create(lvg::profile::dualsense) == (mode == 0 ? STATUS_SUCCESS : STATUS_CANCELLED));
     teardown.get();
     CHECK(deletes == 1); CHECK(f.context.controllers[0].state == slot_state::empty);
   }
@@ -577,6 +619,80 @@ NTSTATUS VhfReadReportSubmit(VHFHANDLE h, PHID_XFER_PACKET packet) {
   if (on_submit) on_submit(h);
   return submit_result;
 }
+void test_power_lifecycle() {
+  sleep_churn_progress churn;
+  for (int i = 0; i < 200; ++i) churn.completed(false, true, true);
+  CHECK(churn.total == 200); CHECK(!churn.recovered());
+  churn.completed(true, false, true); churn.completed(true, true, false);
+  CHECK(!churn.recovered());
+  churn.completed(true, true, true); CHECK(churn.recovered());
+
+  for (auto profile : profiles) {
+    fixture f;
+    CHECK(f.create(profile) == STATUS_SUCCESS);
+    auto &slot = f.context.controllers[0];
+    on_delete = [&](VHFHANDLE h) {
+      CHECK(!f.context.powered);
+      CHECK(slot.state == slot_state::stopping);
+      CHECK(input(slot_of(h)) == STATUS_DEVICE_NOT_READY);
+      retained_unchanged(h);
+    };
+    CHECK(evt_d0_exit(&f.device, 0) == STATUS_SUCCESS);
+    CHECK(deletes == 1); CHECK(slot.state == slot_state::lost);
+    CHECK(slot.owner == &f.owner); CHECK(slot.vhf == nullptr);
+    CHECK(!f.timer.armed);
+    CHECK(f.create(profile) == STATUS_DEVICE_POWERED_OFF);
+    CHECK(fake_cm_queries == 1); // Off-state calls never enumerate/poll.
+    lvg::controller_id_request request {}; lvg::feedback_event event {};
+    CHECK(poll_feedback(&f.context, &f.owner, request, &event) == STATUS_DEVICE_REMOVED);
+    CHECK(poll_feedback(&f.context, &f.stranger, request, &event) == STATUS_ACCESS_DENIED);
+    CHECK(evt_d0_exit(&f.device, 0) == STATUS_SUCCESS); CHECK(deletes == 1);
+    CHECK(evt_d0_entry(&f.device, 0) == STATUS_SUCCESS);
+    lvg::create_controller_request steal {}; steal.requested_profile = profile;
+    CHECK(create_controller(&f.context, &f.stranger, steal) == STATUS_DEVICE_BUSY);
+    CHECK(f.create(profile) == STATUS_SUCCESS); CHECK(creates == 2);
+    on_delete = {};
+  }
+  {
+    fixture f; CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+    evt_d0_exit(&f.device, 0); evt_file_close(&f.owner);
+    CHECK(f.context.controllers[0].state == slot_state::empty);
+    CHECK(deletes == 1);
+  }
+  for (int failure = 0; failure < 6; ++failure) {
+    fixture f;
+    if (failure == 0) fake_cm_size_result = CR_FAILURE;
+    if (failure == 1) fake_cm_list_result = CR_FAILURE;
+    if (failure == 2) fake_cm_list_result = CR_BUFFER_SMALL;
+    if (failure == 3) fake_heap_failure = true;
+    if (failure == 4) fake_cm_ids = {L'x'};
+    if (failure == 5) fake_cm_ids = {L'x', L'x'};
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+  {
+    fixture f;
+    wchar_t instance[128] {}; format_instance_id(instance, RTL_NUMBER_OF(instance), 0);
+    std::wstring child = L"HID\\test&"; child += instance;
+    fake_cm_ids.assign(child.begin(), child.end()); fake_cm_ids.push_back(0); fake_cm_ids.push_back(0);
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+    fake_cm_ids = {0, 0}; CHECK(f.create(lvg::profile::dualsense) == STATUS_SUCCESS);
+  }
+  {
+    fixture f;
+    fake_cm_hook = [&] { evt_d0_exit(&f.device, 0); };
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_POWERED_OFF);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+  {
+    fixture f;
+    fake_cm_hook = [&] { reset_slot(&f.context.controllers[0]); };
+    CHECK(f.create(lvg::profile::dualsense) == STATUS_DEVICE_BUSY);
+    CHECK(creates == 0); CHECK(fake_cm_queries == 1);
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--initialization-only") == 0) {
     test_device_add_configures_non_power_managed_filter_queue();
@@ -585,7 +701,8 @@ int main(int argc, char **argv) {
     test_device_add_propagates_queue_creation_failure();
     std::printf("VHF initialization behavior: %d checks, %d failures\n", checks.load(), failures.load());
   } else if (argc == 1) {
-    test_profiles(); test_start_rollback(); test_prestart_failures();
+    test_disabled_keyboard_mouse();
+    test_power_lifecycle(); test_profiles(); test_start_rollback(); test_prestart_failures();
     test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
     std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
   } else {

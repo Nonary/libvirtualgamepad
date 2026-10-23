@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Chase Payne
 // SPDX-License-Identifier: MIT
+// Adapted from jlobue10's contribution in Nonary/libvirtualgamepad#6.
 // Exercise actual DS4/DS5 reports across multiple tracking-id wraparounds.
 #include "dualshock4.h"
 #include "dualsense.h"

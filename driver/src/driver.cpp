@@ -4,18 +4,28 @@
 // This is a UMDF2 VHF source driver, not a HID minidriver. Its WDF device
 // exposes a private control interface to Vibeshine; VHF creates the HID child
 // for each active controller.
+//
+// Retire controller and optional keyboard/mouse children on D0 exit and expose
+// their loss to the owner.
+// This is a source lifecycle safeguard, not proof that a particular Vhf.sys
+// power watchdog failure is fixed. Native power/WDK validation remains required.
 
 #define WIN32_NO_STATUS
 #include <windows.h>
 #undef WIN32_NO_STATUS
 #include <wdf.h>
 #include <vhf.h>
+#include <cfgmgr32.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <tuple>
+#include <new>
+#include <type_traits>
+
+#include "keyboard_mouse_native.h"
 
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
@@ -97,11 +107,50 @@ enum class slot_state : std::uint8_t {
   starting,
   active,
   stopping,
+  // Deleted because the device left D0. The slot keeps its owner so that
+  // owner's requests report STATUS_DEVICE_REMOVED rather than an unknown
+  // controller; destroying or re-creating it releases the slot.
+  lost,
 };
 
 struct device_context;
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+struct keyboard_mouse_slot;
+struct keyboard_mouse_callback_context {
+  device_context *parent;
+  keyboard_mouse_slot *slot;
+  std::uint64_t generation;
+  volatile LONG retired;
+  volatile LONG active_entries;
+  SRWLOCK entry_lock;
+  CONDITION_VARIABLE entry_drained;
+};
+struct keyboard_mouse_slot {
+  device_context *parent;
+  VHFHANDLE vhf;
+  keyboard_mouse_callback_context *callback_context;
+  std::uint64_t generation;
+  WDFFILEOBJECT owner;
+  slot_state state;
+  lvg::driver::keyboard_mouse_endpoint core;
+  HID_XFER_PACKET read_transfer;
+  GUID container_id;
+  wchar_t instance_id[32];
+  // Callback pumps own these fields under rundown_lock. No lock is held across
+  // VhfReadReportSubmit; stop closes admission, then waits for both counters.
+  SRWLOCK rundown_lock;
+  CONDITION_VARIABLE rundown_drained;
+  ULONG submit_owners;
+  bool pump_active;
+  bool rundown_stopping;
+};
+struct keyboard_mouse_file_context { bool cleanup_started; };
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(keyboard_mouse_file_context, get_keyboard_mouse_file_context);
+#endif
 
 struct controller_slot {
+  std::uint64_t generation; // Reject stale child snapshots after slot reuse.
+
   device_context *parent;
   VHFHANDLE vhf;
   WDFFILEOBJECT owner;
@@ -176,6 +225,9 @@ struct device_context {
   HANDLE vhf_file_handle;
   bool vhf_target_open;
   bool stopping;
+  // Set between EvtDeviceD0Entry and EvtDeviceD0Exit. Child creation and
+  // callback/report admission require it, including the optional KM endpoint.
+  bool powered;
   WDFTIMER pid_timer;
   // Steam Controller keep-alive: a worker thread on a high-resolution waitable
   // timer (see start_sc26_keepalive). A WDFTIMER cannot hold a 4 ms cadence in
@@ -190,6 +242,9 @@ struct device_context {
   // clears this). Keeps a 250 Hz wake-up from running while nobody reads.
   bool sc26_timer_parked;
   controller_slot controllers[lvg::k_max_controllers];
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  keyboard_mouse_slot keyboard_mouse;
+#endif
 };
 
 struct target_context {
@@ -202,9 +257,15 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(target_context, get_target_context);
 EVT_WDF_DRIVER_DEVICE_ADD evt_device_add;
 EVT_WDF_DEVICE_PREPARE_HARDWARE evt_prepare_hardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE evt_release_hardware;
+EVT_WDF_DEVICE_D0_ENTRY evt_d0_entry;
+EVT_WDF_DEVICE_D0_EXIT evt_d0_exit;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP evt_vhf_target_cleanup;
 EVT_WDF_DEVICE_FILE_CREATE evt_file_create;
 EVT_WDF_FILE_CLOSE evt_file_close;
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+EVT_WDF_FILE_CLEANUP evt_keyboard_mouse_file_cleanup;
+#endif
+
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL evt_io_device_control;
 EVT_VHF_ASYNC_OPERATION evt_vhf_write_report;
 EVT_VHF_ASYNC_OPERATION evt_vhf_get_feature;
@@ -310,6 +371,11 @@ void unlock_lifetime(device_context *const context) noexcept {
   return STATUS_SUCCESS;
 }
 
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+[[nodiscard]] bool previous_instance_present(const wchar_t *instance_id) noexcept;
+#include "keyboard_mouse_native.inc"
+#endif
+
 [[nodiscard]] bool is_owned_by(
   const controller_slot &slot,
   const WDFFILEOBJECT owner) noexcept {
@@ -320,17 +386,64 @@ void unlock_lifetime(device_context *const context) noexcept {
 // VhfStart itself. A published handle identifies initialized callback storage;
 // Starting remains private to the creator and is not client-visible Active.
 [[nodiscard]] bool accepts_vhf_callbacks(const controller_slot &slot) noexcept {
-  return !slot.parent->stopping && slot.vhf != nullptr &&
+  return !slot.parent->stopping && slot.parent->powered && slot.vhf != nullptr &&
          (slot.state == slot_state::starting || slot.state == slot_state::active);
 }
 
 void reset_slot(controller_slot *slot) noexcept {
   auto *const parent = slot->parent;
   const auto controller_id = slot->controller_id;
+  const auto generation = slot->generation;
   std::memset(slot, 0, sizeof(*slot));
   slot->parent = parent;
   slot->controller_id = controller_id;
   slot->state = slot_state::empty;
+  slot->generation = generation + 1;
+}
+
+// The status for a request from owner naming a controller that is not active.
+// The caller owns state_lock.
+[[nodiscard]] NTSTATUS inactive_controller_status(
+  const controller_slot &slot,
+  const WDFFILEOBJECT owner) noexcept {
+  return is_owned_by(slot, owner) && slot.state == slot_state::lost
+           ? STATUS_DEVICE_REMOVED
+           : STATUS_DEVICE_NOT_READY;
+}
+
+// A failed or malformed enumeration must never authorize reuse of an instance
+// ID. Take one snapshot only: PnP removal can complete after resume, so retrying
+// belongs to the caller rather than blocking this sequential control queue.
+[[nodiscard]] bool previous_instance_present(const wchar_t *const instance_id) noexcept {
+  constexpr ULONG flags = CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT;
+  ULONG length = 0;
+  if (CM_Get_Device_ID_List_SizeW(&length, L"HID", flags) != CR_SUCCESS ||
+      length == 0 || length > 1024 * 1024) {
+    return true;
+  }
+  auto *const list = static_cast<wchar_t *>(HeapAlloc(GetProcessHeap(), 0, length * sizeof(wchar_t)));
+  if (list == nullptr) return true;
+  const CONFIGRET result = CM_Get_Device_ID_ListW(L"HID", list, length, flags);
+  bool present = true;
+  if (result == CR_SUCCESS && list[length - 1] == L'\0' &&
+      (length == 1 || list[length - 2] == L'\0')) {
+    present = false;
+    for (const wchar_t *id = list; *id != L'\0'; id += wcslen(id) + 1) {
+      const wchar_t *const suffix = wcsrchr(id, L'&');
+      if (suffix != nullptr && _wcsicmp(suffix + 1, instance_id) == 0) {
+        present = true;
+        break;
+      }
+    }
+  }
+  HeapFree(GetProcessHeap(), 0, list);
+  return present;
+}
+
+[[nodiscard]] bool previous_child_present(const controller_slot &slot) noexcept {
+  wchar_t instance_id[sizeof(controller_slot::instance_id) / sizeof(wchar_t)] {};
+  format_instance_id(instance_id, RTL_NUMBER_OF(instance_id), slot.controller_id);
+  return previous_instance_present(instance_id);
 }
 
 // Use only before a VHF handle exists or after synchronous deletion returns.
@@ -377,6 +490,13 @@ void destroy_owned_controller(
     unlock_lifetime(context);
     return;
   }
+  if (slot.state == slot_state::lost) {
+    // EvtDeviceD0Exit already deleted the VHF device.
+    reset_slot(&slot);
+    unlock_context(context);
+    unlock_lifetime(context);
+    return;
+  }
 
   slot.state = slot_state::stopping;
   slot.feedback_pending = false;
@@ -417,6 +537,29 @@ void destroy_owned_controller(
 
   auto &slot = context->controllers[request.controller_id];
 
+  // An owner may re-create a controller lost to a power transition in place.
+  const auto available = [&] {
+    return slot.state == slot_state::empty ||
+           (slot.state == slot_state::lost && is_owned_by(slot, owner));
+  };
+
+  lock_context(context);
+  const bool powered = context->powered;
+  const bool stopping = context->stopping;
+  const bool slot_available = available();
+  const auto generation = slot.generation;
+  unlock_context(context);
+  if (stopping) return STATUS_DEVICE_NOT_READY;
+  if (!powered) {
+    return STATUS_DEVICE_POWERED_OFF;
+  }
+  if (!slot_available) {
+    return STATUS_DEVICE_BUSY;
+  }
+  // Do not hold the lifetime gate across Configuration Manager calls. Their
+  // execution time is OS-owned. Revalidate power and slot generation afterward.
+  const bool child_present = previous_child_present(slot);
+
   // The lifetime gate is distinct from state_lock. VhfStart can invoke the
   // output callback before returning, and that callback needs state_lock.
   // Holding only the outer gate across VHF calls prevents target cleanup from
@@ -428,12 +571,18 @@ void destroy_owned_controller(
     unlock_lifetime(context);
     return STATUS_DEVICE_NOT_READY;
   }
-  if (slot.state != slot_state::empty) {
+  if (!context->powered) {
+    unlock_context(context);
+    unlock_lifetime(context);
+    return STATUS_DEVICE_POWERED_OFF;
+  }
+  if (!available() || slot.generation != generation || child_present) {
     unlock_context(context);
     unlock_lifetime(context);
     return STATUS_DEVICE_BUSY;
   }
 
+  reset_slot(&slot);
   slot.owner = owner;
   slot.selected_profile = request.requested_profile;
   slot.state = slot_state::starting;
@@ -548,7 +697,7 @@ void destroy_owned_controller(
 
   bool adopted = false;
   lock_context(context);
-  if (NT_SUCCESS(status) && !context->stopping &&
+  if (NT_SUCCESS(status) && !context->stopping && context->powered &&
       slot.owner == owner && slot.state == slot_state::starting) {
     slot.state = slot_state::active;
     adopted = true;
@@ -921,6 +1070,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   const bool usable = !context->stopping && owned && exists &&
                       slot.state == slot_state::active && slot.vhf != nullptr;
   const lvg::profile profile = slot.selected_profile;
+  const NTSTATUS inactive_status = inactive_controller_status(slot, owner);
   unlock_context(context);
 
   if (!exists) {
@@ -930,7 +1080,7 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
     return STATUS_ACCESS_DENIED;
   }
   if (!usable) {
-    return STATUS_DEVICE_NOT_READY;
+    return inactive_status;
   }
   if (!is_playstation(profile) && profile != lvg::profile::switch_pro &&
       !is_steam_controller(profile)) {
@@ -1121,13 +1271,10 @@ void evt_vhf_ready_for_next_report(PVOID vhf_client_context) {
   lock_context(context);
   if (slot.state == slot_state::empty || !is_owned_by(slot, owner) || context->stopping ||
       slot.state != slot_state::active || slot.vhf == nullptr) {
-    // Same ladder as begin_state_update / destroy / poll_feedback.
-    const NTSTATUS status = slot.state == slot_state::empty ? STATUS_NOT_FOUND :
-                            !is_owned_by(slot, owner)        ? STATUS_ACCESS_DENIED :
-                                                               STATUS_DEVICE_NOT_READY;
+    const NTSTATUS inactive_status = inactive_controller_status(slot, owner);
     unlock_context(context);
     unlock_lifetime(context);
-    return status;
+    return inactive_status;
   }
   if (is_playstation(slot.selected_profile)) {
     slot.last_input = request;
@@ -1372,7 +1519,7 @@ void fill_query_info(lvg::query_info_response *const output) noexcept {
   } else if (!is_owned_by(slot, owner)) {
     status = STATUS_ACCESS_DENIED;
   } else if (slot.state != slot_state::active) {
-    status = STATUS_DEVICE_NOT_READY;
+    status = inactive_controller_status(slot, owner);
   } else if (slot.settings_count != 0) {
     *output = slot.settings_queue[slot.settings_head];
     slot.settings_head = static_cast<std::uint8_t>((slot.settings_head + 1) % k_settings_queue_capacity);
@@ -2326,7 +2473,7 @@ void evt_io_device_control(
   WDFQUEUE queue,
   WDFREQUEST request,
   const size_t output_buffer_length,
-  const size_t,
+  const size_t input_buffer_length,
   const ULONG io_control_code) {
   auto *const context = get_device_context(WdfIoQueueGetDevice(queue));
   const WDFFILEOBJECT owner = WdfRequestGetFileObject(request);
@@ -2337,6 +2484,16 @@ void evt_io_device_control(
     WdfRequestComplete(request, STATUS_INVALID_HANDLE);
     return;
   }
+
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  if (dispatch_keyboard_mouse(context, owner, request, output_buffer_length,
+                              input_buffer_length, io_control_code, &status, &information)) {
+    WdfRequestCompleteWithInformation(request, status, information);
+    return;
+  }
+#else
+  static_cast<void>(input_buffer_length);
+#endif
 
   switch (io_control_code) {
     case lvg::ioctl_query_info: {
@@ -2485,29 +2642,69 @@ void evt_io_device_control(
   WdfRequestCompleteWithInformation(request, status, information);
 }
 
-void evt_file_create(WDFDEVICE, WDFREQUEST request, WDFFILEOBJECT) {
+void evt_file_create(WDFDEVICE, WDFREQUEST request, WDFFILEOBJECT file_object) {
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  // The source's own local target may use a null/unknown file per the INF.
+  // Keep its create path working; private KM IOCTLs still require a real owner.
+  if (file_object != nullptr) get_keyboard_mouse_file_context(file_object)->cleanup_started = false;
+#else
+  static_cast<void>(file_object);
+#endif
   WdfRequestComplete(request, STATUS_SUCCESS);
 }
 
 void evt_file_close(WDFFILEOBJECT file_object) {
+  if (file_object == nullptr) return; // Internal local-target file policy.
   const WDFDEVICE device = WdfFileObjectGetDevice(file_object);
   auto *const context = get_device_context(device);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  evt_keyboard_mouse_file_cleanup(file_object);
+#endif
   for (std::uint32_t controller_id = 0; controller_id < lvg::k_max_controllers; ++controller_id) {
     destroy_owned_controller(context, file_object, controller_id);
   }
 }
 
-// Tears down every controller this device owns and drops the VHF file handle.
+// Tears down every HID child this device owns and drops the VHF file handle.
 // Callers must hold neither lock. forget_target is set only when the target
 // object itself is going away.
 void stop_owned_controllers(device_context *const context, const bool forget_target) noexcept {
   VHFHANDLE handles[lvg::k_max_controllers] {};
 
+  // Publish intent before waiting for a creator in VhfCreate/VhfStart. Its
+  // adoption check and reentrant callbacks must not admit more work meanwhile.
+  lock_context(context);
+  context->stopping = true;
+  context->powered = false;
+  unlock_context(context);
   lock_lifetime(context);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  lock_keyboard_mouse_rundown(context->keyboard_mouse);
+#endif
   lock_context(context);
   const WDFTIMER timer = context->pid_timer;
   context->sc26_timer_running = false;
-  context->stopping = true;
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  stop_keyboard_mouse_admission_locked(context->keyboard_mouse);
+#endif
+  for (auto &slot : context->controllers) {
+    slot.feedback_pending = false;
+    slot.haptic_count = 0;
+    slot.settings_count = 0;
+    if (slot.state == slot_state::active || slot.state == slot_state::starting) {
+      slot.state = slot_state::stopping;
+    } else if (slot.state == slot_state::lost) {
+      reset_slot(&slot);
+    }
+  }
+  unlock_context(context);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  unlock_keyboard_mouse_rundown(context->keyboard_mouse);
+  // Keep the shared target/file and controller storage until KM has drained
+  // reserved submissions and synchronously removed its child.
+  delete_stopped_keyboard_mouse(context);
+#endif
+  lock_context(context);
   context->vhf_file_handle = nullptr;
   if (forget_target) {
     context->local_vhf_target = nullptr;
@@ -2515,15 +2712,9 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
   }
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     auto &slot = context->controllers[index];
-    slot.feedback_pending = false;
-    slot.haptic_count = 0;
-    slot.settings_count = 0;
-    if (slot.state == slot_state::active && slot.vhf != nullptr) {
-      slot.state = slot_state::stopping;
+    if (slot.state == slot_state::stopping) {
       handles[index] = slot.vhf;
       slot.vhf = nullptr;
-    } else if (slot.state == slot_state::starting) {
-      slot.state = slot_state::stopping;
     }
   }
   unlock_context(context);
@@ -2538,11 +2729,8 @@ void stop_owned_controllers(device_context *const context, const bool forget_tar
       unlock_context(context);
     }
   }
-
   // Stopped outside state_lock because the tick callbacks acquire it.
-  if (timer != nullptr) {
-    WdfTimerStop(timer, TRUE);
-  }
+  if (timer != nullptr) WdfTimerStop(timer, TRUE);
   stop_sc26_keepalive(context);
   unlock_lifetime(context);
 }
@@ -2562,6 +2750,93 @@ void evt_vhf_target_cleanup(WDFOBJECT object) {
     return;
   }
   stop_owned_controllers(context, true);
+}
+
+// D0 exit serializes with creation and retires handles before forgetting their
+// report buffers. Synchronous VhfDelete drains callbacks; its duration is owned
+// by VHF and is not claimed to have a driver-enforced timeout.
+void power_down_controllers(device_context *const context) noexcept {
+  VHFHANDLE handles[lvg::k_max_controllers] {};
+
+  lock_context(context);
+  context->powered = false;
+  unlock_context(context);
+  lock_lifetime(context);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  lock_keyboard_mouse_rundown(context->keyboard_mouse);
+#endif
+  lock_context(context);
+  const WDFTIMER timer = context->pid_timer;
+  context->sc26_timer_running = false;
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  stop_keyboard_mouse_admission_locked(context->keyboard_mouse);
+#endif
+  for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
+    auto &slot = context->controllers[index];
+    // The lifetime gate keeps creation from being part way through VhfStart, so
+    // no slot is starting here.
+    if (slot.state == slot_state::active && slot.vhf != nullptr) {
+      slot.state = slot_state::stopping;
+      slot.feedback_pending = false;
+      handles[index] = slot.vhf;
+    }
+  }
+  unlock_context(context);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  unlock_keyboard_mouse_rundown(context->keyboard_mouse);
+  delete_stopped_keyboard_mouse(context, true);
+#endif
+  lock_context(context);
+  for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
+    if (handles[index] != nullptr) context->controllers[index].vhf = nullptr;
+  }
+  unlock_context(context);
+
+  for (const auto handle : handles) {
+    if (handle != nullptr) {
+      VhfDelete(handle, TRUE);
+    }
+  }
+
+  // Stopped outside state_lock because the tick callbacks acquire it. The
+  // Steam Controller keep-alive worker restarts with the first input state
+  // after the slots are re-created.
+  if (timer != nullptr) {
+    WdfTimerStop(timer, TRUE);
+  }
+  stop_sc26_keepalive(context);
+
+  lock_context(context);
+  for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
+    auto &slot = context->controllers[index];
+    if (handles[index] != nullptr && slot.state == slot_state::stopping) {
+      const WDFFILEOBJECT owner = slot.owner;
+      const lvg::profile profile = slot.selected_profile;
+      reset_slot(&slot);
+      slot.owner = owner;
+      slot.selected_profile = profile;
+      slot.state = slot_state::lost;
+    }
+  }
+  unlock_context(context);
+  unlock_lifetime(context);
+}
+
+NTSTATUS evt_d0_entry(WDFDEVICE device, WDF_POWER_DEVICE_STATE) {
+  auto *const context = get_device_context(device);
+  lock_lifetime(context);
+  lock_context(context);
+  context->powered = true;
+  unlock_context(context);
+  unlock_lifetime(context);
+  return STATUS_SUCCESS;
+}
+
+// Every way out of D0 comes through here: sleep, hibernate, shutdown, disable,
+// and removal. Failing would only leave the device in a worse state.
+NTSTATUS evt_d0_exit(WDFDEVICE device, WDF_POWER_DEVICE_STATE) {
+  power_down_controllers(get_device_context(device));
+  return STATUS_SUCCESS;
 }
 
 // A UMDF source driver cannot open its own local target before the device is
@@ -2627,16 +2902,29 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
     &file_config,
     evt_file_create,
     evt_file_close,
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+    evt_keyboard_mouse_file_cleanup);
+  // This filter completes private creates itself. Do not forward unmatched
+  // cleanup/close requests to the underlying VHF function driver.
+  file_config.AutoForwardCleanupClose = WdfFalse;
+#else
     WDF_NO_EVENT_CALLBACK);
+#endif
 
   WDF_OBJECT_ATTRIBUTES file_attributes;
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&file_attributes, keyboard_mouse_file_context);
+#else
   WDF_OBJECT_ATTRIBUTES_INIT(&file_attributes);
+#endif
   WdfDeviceInitSetFileObjectConfig(device_init, &file_config, &file_attributes);
 
   WDF_PNPPOWER_EVENT_CALLBACKS pnp_callbacks;
   WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnp_callbacks);
   pnp_callbacks.EvtDevicePrepareHardware = evt_prepare_hardware;
   pnp_callbacks.EvtDeviceReleaseHardware = evt_release_hardware;
+  pnp_callbacks.EvtDeviceD0Entry = evt_d0_entry;
+  pnp_callbacks.EvtDeviceD0Exit = evt_d0_exit;
   WdfDeviceInitSetPnpPowerEventCallbacks(device_init, &pnp_callbacks);
 
   WDF_OBJECT_ATTRIBUTES device_attributes;
@@ -2650,7 +2938,17 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   }
 
   auto *const context = get_device_context(device);
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+  // WDF supplies raw context memory; construct the FIFO before callbacks can
+  // enter. It owns no resources requiring a later C++ destructor callback.
+  static_assert(std::is_trivially_destructible_v<device_context>);
+  ::new (static_cast<void *>(context)) device_context {};
+  context->keyboard_mouse.parent = context;
+  InitializeSRWLock(&context->keyboard_mouse.rundown_lock);
+  InitializeConditionVariable(&context->keyboard_mouse.rundown_drained);
+#else
   std::memset(context, 0, sizeof(*context));
+#endif
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
     context->controllers[index].parent = context;
     context->controllers[index].controller_id = index;
@@ -2728,9 +3026,11 @@ NTSTATUS evt_device_add(WDFDRIVER, PWDFDEVICE_INIT device_init) {
 
   WDF_IO_QUEUE_CONFIG queue_config;
   WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queue_config, WdfIoQueueDispatchSequential);
-  // VHF owns power policy below this upper filter, so this queue must continue
-  // dispatching while VHF drives a D0 transition. The existing lifetime and
-  // stopping gates keep control requests away from released VHF resources.
+  // Not power-managed: WDF requires that drivers above the power policy owner
+  // (Vhf.sys) leave their queues unmanaged. Power is synchronized explicitly
+  // instead. EvtDeviceD0Exit and every VHF call hold the lifetime gate, and a
+  // create while the device is out of D0 fails at once with
+  // STATUS_DEVICE_POWERED_OFF rather than waiting out the sleep in the queue.
   queue_config.PowerManaged = WdfFalse;
   queue_config.EvtIoDeviceControl = evt_io_device_control;
   return WdfIoQueueCreate(device, &queue_config, WDF_NO_OBJECT_ATTRIBUTES, nullptr);

@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "libvirtualgamepad/protocol.h"
+#include "libvirtualgamepad/keyboard_mouse_control.h"
 
 namespace lvg {
 
@@ -34,6 +35,12 @@ struct steam_controller_attributes {
 // the same connection from several threads must be serialised by the caller
 // (the driver serialises per handle, the library does not). Distinct
 // connections are independent.
+//
+// A controller is deleted when the machine sleeps, hibernates, or shuts down.
+// Its next submit or poll returns ERROR_DEVICE_REMOVED; destroy_controller()
+// then create_controller() on the same slot can restore it after resume.
+// Creation may return ERROR_BUSY until PnP removes the previous child; callers
+// should retry with their own bounded backoff, not block a suspend callback.
 class client final {
  public:
   client() noexcept = default;
@@ -121,7 +128,27 @@ class client final {
     std::uint32_t controller_id,
     const steam_controller_attributes &attributes) noexcept;
 
+  // Optional source-stage extension on this same owned control handle. No
+  // protocol2/released capability or native identity qualification is implied.
+  // The client (including connect/close/move) requires external serialization.
+  [[nodiscard]] DWORD query_keyboard_mouse(km::query_response *response) noexcept;
+  [[nodiscard]] DWORD open_keyboard_mouse() noexcept;
+  // ERROR_BUSY means neutral drain is incomplete; retry boundedly. Success
+  // means the child was synchronously removed after both neutrals retired.
+  [[nodiscard]] DWORD close_keyboard_mouse() noexcept;
+  // Force-remove only this owned KM child without closing controller slots on
+  // the shared handle. Use after uncertain input/close timeout; no neutral proof.
+  [[nodiscard]] DWORD abort_keyboard_mouse() noexcept;
+  // ERROR_BUSY rejects before mutation. Any other transport failure after
+  // acceptance is uncertain; never replay through SendInput before teardown.
+  [[nodiscard]] DWORD submit_keyboard_mouse(const km::keyboard_request &input) noexcept;
+  [[nodiscard]] DWORD submit_keyboard_mouse(const km::button_request &input) noexcept;
+  [[nodiscard]] DWORD submit_keyboard_mouse(const km::relative_request &input) noexcept;
+  [[nodiscard]] DWORD submit_keyboard_mouse(const km::absolute_request &input) noexcept;
+
  private:
+  [[nodiscard]] DWORD issue_keyboard_mouse_submission(
+    DWORD control_code, void *input, DWORD input_size) noexcept;
   [[nodiscard]] DWORD query_info() noexcept;
   [[nodiscard]] DWORD issue(
     DWORD control_code,

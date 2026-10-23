@@ -250,6 +250,79 @@ DWORD client::poll_feedback(
   return ERROR_SUCCESS;
 }
 
+DWORD client::query_keyboard_mouse(km::query_response *const response) noexcept {
+  if (response == nullptr) return ERROR_INVALID_PARAMETER;
+  *response = {};
+  auto request = km::request<km::control_request>();
+  km::query_response received {};
+  DWORD bytes = 0;
+  const DWORD status = issue(km::ioctl_query, &request, sizeof(request),
+    &received, sizeof(received), &bytes);
+  if (status != ERROR_SUCCESS) return status;
+  if (bytes != sizeof(received) || !km::valid(received) || received.reserved != 0 ||
+      (received.capabilities & ~km::k_required_capabilities) != 0 ||
+      (received.capabilities & km::k_relative_capabilities) != km::k_relative_capabilities ||
+      received.queue_capacity < 2 ||
+      (((received.capabilities & km::bound_absolute_mouse) != 0) !=
+       (received.absolute_target_generation != 0))) {
+    return ERROR_INVALID_DATA;
+  }
+  *response = received;
+  return ERROR_SUCCESS;
+}
+
+DWORD client::open_keyboard_mouse() noexcept {
+  auto request = km::request<km::control_request>();
+  return issue(km::ioctl_open, &request, sizeof(request), nullptr, 0);
+}
+DWORD client::close_keyboard_mouse() noexcept {
+  auto request = km::request<km::control_request>();
+  return issue(km::ioctl_close, &request, sizeof(request), nullptr, 0);
+}
+DWORD client::abort_keyboard_mouse() noexcept {
+  auto request = km::request<km::control_request>();
+  return issue(km::ioctl_abort, &request, sizeof(request), nullptr, 0);
+}
+DWORD client::submit_keyboard_mouse(const km::keyboard_request &input) noexcept {
+  if (!km::valid(input) || input.reserved != 0 || input.pressed > 1 ||
+      input.usage < 4 || input.usage > 0xe7) return ERROR_INVALID_PARAMETER;
+  auto request = input;
+  return issue_keyboard_mouse_submission(km::ioctl_keyboard, &request, sizeof(request));
+}
+DWORD client::submit_keyboard_mouse(const km::button_request &input) noexcept {
+  if (!km::valid(input) || input.reserved != 0 || input.pressed > 1 ||
+      input.button < 1 || input.button > 5) return ERROR_INVALID_PARAMETER;
+  auto request = input;
+  return issue_keyboard_mouse_submission(km::ioctl_button, &request, sizeof(request));
+}
+DWORD client::submit_keyboard_mouse(const km::relative_request &input) noexcept {
+  if (!km::valid(input) || input.reserved != 0 || input.wheel == -128 ||
+      input.pan == -128) return ERROR_INVALID_PARAMETER;
+  auto request = input;
+  return issue_keyboard_mouse_submission(km::ioctl_relative, &request, sizeof(request));
+}
+DWORD client::submit_keyboard_mouse(const km::absolute_request &input) noexcept {
+  if (!km::valid(input)) return ERROR_INVALID_PARAMETER;
+  auto request = input;
+  return issue_keyboard_mouse_submission(km::ioctl_absolute, &request, sizeof(request));
+}
+
+DWORD client::issue_keyboard_mouse_submission(const DWORD code, void *const input,
+  const DWORD input_size) noexcept {
+  km::submission_response response {};
+  DWORD bytes = 0;
+  const DWORD status = issue(code, input, input_size, &response, sizeof(response), &bytes);
+  // Only a validated producer reply can establish pre-admission backpressure.
+  // A transport-origin busy may follow unknown delivery and is not retry-safe.
+  if (status != ERROR_SUCCESS) return status == ERROR_BUSY ? ERROR_NOT_READY : status;
+  if (bytes != sizeof(response) || !km::valid(response) || response.reserved != 0) return ERROR_INVALID_DATA;
+  switch (response.acceptance) {
+    case km::submission_acceptance::accepted: return ERROR_SUCCESS;
+    case km::submission_acceptance::busy: return ERROR_BUSY;
+  }
+  return ERROR_INVALID_DATA;
+}
+
 DWORD client::query_info() noexcept {
   query_info_request request {};
   initialize_header(&request.header, sizeof(request));

@@ -11,8 +11,8 @@ ctest --test-dir build/contract-tests --output-on-failure --parallel 2
 `vhf_lifecycle_contract` includes the complete production `driver.cpp` and links
 the actual profile, report pump, and PID implementations. Only this target uses
 the WDF/VHF boundary models in `support/vhf` on Windows. On other platforms, the
-descriptor, PlayStation touch, Steam haptic queue, and identity tests also use its
-minimal Windows ABI declarations.
+descriptor, identity, touch, and Steam haptic queue tests also use its minimal
+Windows ABI declarations.
 The real driver and installed-device probes never use those headers.
 
 The lifecycle contract checks:
@@ -58,3 +58,10 @@ IRQL, Windows wide-character ABI, HID enumeration, signing, or kernel behavior.
 They do not establish reWASD recognition. A WDK build and Windows runtime
 qualification remain separate checks. Installed-device probes are manual and
 are not part of the portable suite.
+
+`playstation_touch_contract` links the production DS4 and DualSense encoders.
+It holds either touch contact while tapping the other 400 times, checking that
+active tracking IDs remain distinct across multiple 7-bit wraps, repeated DOWN
+and MOVE preserve IDs, and UP/cancel-all preserve the release semantics.
+The regression and allocation fix are adapted from
+[jlobue10's contribution in PR #6](https://github.com/Nonary/libvirtualgamepad/pull/6).

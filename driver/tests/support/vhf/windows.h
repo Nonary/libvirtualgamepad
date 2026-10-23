@@ -16,6 +16,7 @@ using PWSTR = wchar_t *;
 using PVOID = void *;
 using HANDLE = void *;
 using BOOLEAN = bool;
+using BOOL = std::int32_t;
 using NTSTATUS = std::int32_t;
 using PDRIVER_OBJECT = void *;
 using PUNICODE_STRING = void *;
@@ -24,6 +25,25 @@ struct GUID {
   std::uint16_t Data2, Data3;
   std::uint8_t Data4[8];
 };
+// POD stand-ins for the user-mode synchronization ABI. The fixture supplies
+// the backing mutex/condition variable through opaque pointers; these are not
+// Windows implementations and make no UMDF runtime qualification claim.
+struct SRWLOCK { void *state; };
+struct CONDITION_VARIABLE { void *state; };
+void InitializeSRWLock(SRWLOCK *lock);
+void InitializeConditionVariable(CONDITION_VARIABLE *condition);
+void AcquireSRWLockExclusive(SRWLOCK *lock);
+void ReleaseSRWLockExclusive(SRWLOCK *lock);
+BOOL SleepConditionVariableSRW(
+  CONDITION_VARIABLE *condition, SRWLOCK *lock, DWORD milliseconds, ULONG flags);
+void WakeAllConditionVariable(CONDITION_VARIABLE *condition);
+void Sleep(DWORD milliseconds);
+LONG InterlockedExchange(volatile LONG *destination, LONG value);
+LONG InterlockedCompareExchange(volatile LONG *destination, LONG exchange, LONG comparand);
+LONG InterlockedIncrement(volatile LONG *destination);
+LONG InterlockedDecrement(volatile LONG *destination);
+inline constexpr DWORD INFINITE = 0xffffffffu;
+inline constexpr ULONG CONDITION_VARIABLE_LOCKMODE_SHARED = 0x1;
 inline constexpr bool TRUE = true, FALSE = false;
 inline constexpr NTSTATUS STATUS_SUCCESS = 0;
 inline constexpr NTSTATUS STATUS_INVALID_PARAMETER = -1;
@@ -31,6 +51,7 @@ inline constexpr NTSTATUS STATUS_NOT_SUPPORTED = -2;
 inline constexpr NTSTATUS STATUS_DEVICE_NOT_READY = -3;
 inline constexpr NTSTATUS STATUS_DEVICE_BUSY = -4;
 inline constexpr NTSTATUS STATUS_CANCELLED = -5;
+inline constexpr NTSTATUS STATUS_INSUFFICIENT_RESOURCES = -15;
 inline constexpr NTSTATUS STATUS_ACCESS_DENIED = -6;
 inline constexpr NTSTATUS STATUS_NOT_FOUND = -7;
 inline constexpr NTSTATUS STATUS_INVALID_DEVICE_REQUEST = -8;
@@ -48,7 +69,6 @@ inline constexpr bool NT_SUCCESS(NTSTATUS status) { return status >= 0; }
 // clock) and SwitchToThread (the submit drain) do their real job.
 #include <chrono>
 #include <thread>
-using BOOL = int;
 using LONGLONG = std::int64_t;
 using LPVOID = void *;
 using LPCWSTR = const wchar_t *;
@@ -56,7 +76,6 @@ using LPSECURITY_ATTRIBUTES = void *;
 using LPTHREAD_START_ROUTINE = DWORD (*)(LPVOID);
 #define WINAPI
 struct LARGE_INTEGER { LONGLONG QuadPart; };
-inline constexpr DWORD INFINITE = 0xFFFFFFFFu;
 inline constexpr DWORD WAIT_OBJECT_0 = 0;
 inline constexpr DWORD WAIT_FAILED = 0xFFFFFFFFu;
 inline constexpr DWORD TIMER_ALL_ACCESS = 0x1F0003u;
@@ -81,4 +100,18 @@ inline HANDLE CreateThread(LPSECURITY_ATTRIBUTES, std::size_t, LPTHREAD_START_RO
 inline BOOL SetThreadPriority(HANDLE, int) { return 0; }
 inline DWORD WaitForSingleObject(HANDLE, DWORD) { return WAIT_FAILED; }
 inline DWORD WaitForMultipleObjects(DWORD, const HANDLE *, BOOL, DWORD) { return WAIT_FAILED; }
-inline BOOL CloseHandle(HANDLE) { return 1; }
+// Supplied by the fixture (the keyboard/mouse transport test counts closes).
+BOOL CloseHandle(HANDLE handle);
+
+// Configuration Manager and clock-free power lifecycle test boundaries.
+#include <cstdlib>
+#include <cwctype>
+inline constexpr NTSTATUS STATUS_DEVICE_REMOVED = -13, STATUS_DEVICE_POWERED_OFF = -14;
+inline bool fake_heap_failure = false;
+inline HANDLE GetProcessHeap() { return nullptr; }
+inline void *HeapAlloc(HANDLE, DWORD, std::size_t bytes) { return fake_heap_failure ? nullptr : std::calloc(1, bytes); }
+inline void HeapFree(HANDLE, DWORD, void *p) { std::free(p); }
+inline int _wcsicmp(const wchar_t *a, const wchar_t *b) {
+  while (*a && std::towlower(*a) == std::towlower(*b)) { ++a; ++b; }
+  return int(std::towlower(*a)) - int(std::towlower(*b));
+}
