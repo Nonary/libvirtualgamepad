@@ -11,7 +11,8 @@ ctest --test-dir build/contract-tests --output-on-failure --parallel 2
 `vhf_lifecycle_contract` includes the complete production `driver.cpp` and links
 the actual profile, report pump, and PID implementations. Only this target uses
 the WDF/VHF boundary models in `support/vhf` on Windows. On other platforms, the
-descriptor, identity, and touch tests also use its minimal Windows ABI declarations.
+descriptor, identity, touch, and Steam haptic queue tests also use its minimal
+Windows ABI declarations.
 The real driver and installed-device probes never use those headers.
 
 The lifecycle contract checks:
@@ -32,7 +33,12 @@ The lifecycle contract checks:
   against an in-progress start.
 
 Models enforce nonrecursive wait locks, no state lock across VHF calls, and no
-lifetime lock in callbacks. Unused WDF setup/request routines fail closed. VHF
+lifetime lock in callbacks. Unused WDF setup/request routines fail closed.
+The Steam Controller keep-alive worker's user-mode primitives (waitable timer,
+stop event, worker thread) also fail closed in `support/vhf/windows.h`: the
+fixture never creates those handles, so no worker runs here and the keep-alive
+scheduling is covered by `test_sc26_keepalive.py` instead; only the performance
+counter (the report clock) and `SwitchToThread` (the submit drain) are live. VHF
 callbacks are deliberately injected during deletion to verify rejection while
 storage is retained. Cancellation-state injection tests a defensive branch;
 normal lifecycle callers serialize behind the outer lifetime gate.

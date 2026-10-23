@@ -13,6 +13,10 @@
 #include <thread>
 #include <vector>
 
+// The Steam Controller keep-alive worker never starts under this fixture (handle
+// creation fails closed in support/vhf/windows.h); closing its null handles is a no-op.
+BOOL CloseHandle(HANDLE) { return TRUE; }
+
 namespace {
 std::atomic<int> checks {}, failures {};
 #define CHECK(expr) do { ++checks; if (!(expr)) { ++failures; std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); } } while (false)
