@@ -22,3 +22,14 @@
 *.pfx
 *.pvk
 *.cer
+
+# Raw USB hub captures carry every device on the hub. Capture-SteamController.ps1
+# keeps them in a private %TEMP% directory and only ever writes the per-device
+# filtered artifacts it lists at the end under captures/; never commit a raw one.
+/captures/*.pcap
+/captures/**/*.pcap
+/captures/**/USBPcap*
+
+# Python bytecode (tools/capture harness)
+__pycache__/
+*.py[cod]
