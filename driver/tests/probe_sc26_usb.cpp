@@ -785,6 +785,5 @@ int main(int argc, char **argv) {
     check(polled == ERROR_NOT_FOUND, "poll_feedback on a released slot is ERROR_NOT_FOUND");
   }
   std::printf("%s\n", failures ? "PROBE FAILED" : "PROBE PASSED");
-  timeEndPeriod(1);
-  return failures ? 1 : 0;
+  return failures ? 1 : 0;  // timer_period releases timeBeginPeriod(1) on every return path
 }
