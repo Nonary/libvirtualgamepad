@@ -35,6 +35,7 @@
 #include "libvirtualgamepad/hid_path.h"
 
 #include <windows.h>
+#include <cfgmgr32.h>
 #include <hidsdi.h>
 #include <setupapi.h>
 #include <timeapi.h>
@@ -44,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -78,9 +80,20 @@ struct found_collection {
   HIDP_CAPS caps {};
 };
 
-// Every new HID path of our VID/PID, with its top-level usage. Windows splits
-// the three collections of the real descriptor into three paths.
-std::vector<found_collection> new_collections(const GUID &guid, const std::set<std::wstring> &before) {
+std::wstring lower_case(const wchar_t *text) {
+  std::wstring lower(text);
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  return lower;
+}
+
+// Every new HID collection of our VID/PID beneath the VHF child the driver
+// created for `slot` (or beneath any of its children when `slot` is empty),
+// with its top-level usage. Windows splits the three collections of the real
+// descriptor into three paths. Selection goes by the parent device's identity,
+// never by the path: a physical unit's collections can carry our VID/PID with
+// no "&mi_" segment, and a collection whose parent cannot be read is skipped.
+std::vector<found_collection> new_collections(const GUID &guid, const std::set<std::wstring> &before,
+                                              const std::optional<unsigned> slot) {
   std::vector<found_collection> out;
   auto set = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
   if (set == INVALID_HANDLE_VALUE) return out;
@@ -93,11 +106,16 @@ std::vector<found_collection> new_collections(const GUID &guid, const std::set<s
     std::vector<unsigned char> storage(size);
     auto *detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W *>(storage.data());
     detail->cbSize = sizeof(*detail);
-    if (!SetupDiGetDeviceInterfaceDetailW(set, &item, detail, size, nullptr, nullptr)) continue;
+    SP_DEVINFO_DATA device {}; device.cbSize = sizeof(device);
+    if (!SetupDiGetDeviceInterfaceDetailW(set, &item, detail, size, nullptr, &device)) continue;
     if (before.contains(detail->DevicePath)) continue;
-    std::wstring lower(detail->DevicePath);
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-    if (!lvg::is_virtual_sc26_child_path(lower)) continue;  // never a physical unit (&mi_ paths)
+    if (!lvg::is_sc26_hid_path(lower_case(detail->DevicePath))) continue;
+    DEVINST parent = 0;
+    wchar_t instance[MAX_DEVICE_ID_LEN] {};
+    if (CM_Get_Parent(&parent, device.DevInst, 0) != CR_SUCCESS ||
+        CM_Get_Device_IDW(parent, instance, MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS) continue;
+    const auto child_slot = lvg::virtual_sc26_child_slot(lower_case(instance));
+    if (!child_slot || (slot && *child_slot != *slot)) continue;  // never a physical unit
     // Mouse/keyboard collections are owned by their class drivers: open without
     // read/write just to read attributes and capabilities.
     auto h = CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -153,7 +171,7 @@ bool read_report(HANDLE handle, std::array<unsigned char, 64> &report, DWORD &by
 // Every present vendor collection (usage ff00/0001) of VID 28DE PID 1302.
 std::vector<found_collection> present_vendor_collections(const GUID &guid) {
   std::vector<found_collection> out;
-  for (const auto &c : new_collections(guid, {})) {
+  for (const auto &c : new_collections(guid, {}, std::nullopt)) {
     if (c.attributes.VendorID == 0x28de && c.attributes.ProductID == 0x1302 && c.usage_page == 0xff00 && c.usage == 0x0001) out.push_back(c);
   }
   return out;
@@ -371,7 +389,7 @@ int main(int argc, char **argv) {
   if (status != ERROR_SUCCESS) { std::printf("  error %lu\n", status); return 1; }
 
   std::vector<found_collection> collections;
-  for (int retry = 0; retry < 100 && collections.size() < 3; ++retry) { Sleep(100); collections = new_collections(guid, before); }
+  for (int retry = 0; retry < 100 && collections.size() < 3; ++retry) { Sleep(100); collections = new_collections(guid, before, slot); }
   std::printf("new HID collections for VID 28DE PID 1302: %zu\n", collections.size());
   const found_collection *vendor = nullptr;
   bool mouse = false, keyboard = false;

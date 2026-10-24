@@ -55,7 +55,7 @@ if(WIN32)
     add_executable(probe_sc26_usb probe_sc26_usb.cpp ../../client/client.cpp)
     target_compile_features(probe_sc26_usb PRIVATE cxx_std_20)
     target_include_directories(probe_sc26_usb PRIVATE ../../include)
-    target_link_libraries(probe_sc26_usb PRIVATE setupapi hid winmm)
+    target_link_libraries(probe_sc26_usb PRIVATE setupapi hid cfgmgr32 winmm)
     # Deliberately not a CTest: creates a controller on the installed driver.
 
     # The client library's error contract against a fake DeviceIoControl.

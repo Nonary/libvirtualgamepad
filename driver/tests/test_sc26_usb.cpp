@@ -37,13 +37,32 @@ int main() {
   using namespace lvg::sc26_usb;
 
   check(version == 0x0307, "bcdDevice is the captured unit's 0x0307");
-  // The probes select the device they will write to by this predicate.
-  check(lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1302#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
-        "a VHF child path of our VID/PID is a virtual controller");
-  check(!lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1302&mi_02#8&2b3c4d5e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
-        "a multi-interface (physical USB) path is never selected");
-  check(!lvg::is_virtual_sc26_child_path(L"\\\\?\\hid#vid_28de&pid_1205#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
-        "another Valve product is not selected");
+  // The probes select the device they will write to by its parent's identity,
+  // after a VID/PID pre-filter on the path.
+  check(lvg::is_sc26_hid_path(L"\\\\?\\hid#vid_28de&pid_1302#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
+        "a HID path of our VID/PID passes the pre-filter");
+  check(!lvg::is_sc26_hid_path(L"\\\\?\\hid#vid_28de&pid_1205#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"),
+        "another Valve product does not");
+  check(lvg::is_virtual_sc26_child_instance(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad7", 7) &&
+            lvg::virtual_sc26_child_slot(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad15") == 15u,
+        "the VHF child the driver stamped for a slot is the virtual controller");
+  check(!lvg::is_virtual_sc26_child_instance(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad7", 1) &&
+            !lvg::is_virtual_sc26_child_instance(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad1", 17) &&
+            !lvg::is_virtual_sc26_child_instance(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad17", 1) &&
+            !lvg::virtual_sc26_child_slot(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad07") &&
+            !lvg::virtual_sc26_child_slot(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad7x"),
+        "another slot's child is not selected, not even as a digit prefix, padding or suffix");
+  check(!lvg::virtual_sc26_child_slot(L"usb\\vid_28de&pid_1302&mi_02\\8&2b3c4d5e&0&0002"),
+        "a physical unit's USB interface device is never selected");
+  // A physical unit plugged in after the probe's path snapshot enumerates its
+  // collections as "&col03" paths with no "&mi_" segment: the path cannot reject
+  // it, the parent identity does, and no write handle is opened to it.
+  check(lvg::is_sc26_hid_path(L"\\\\?\\hid#vid_28de&pid_1302&col03#9&3c4d5e6f&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}") &&
+            !lvg::virtual_sc26_child_slot(L"usb\\vid_28de&pid_1302\\9&3c4d5e6f&0&0002"),
+        "a physical unit's COL03 collection appearing after the snapshot is rejected by its parent, not its path");
+  check(!lvg::virtual_sc26_child_slot(L"") && !lvg::virtual_sc26_child_slot(L"vibeshinegamepad7") &&
+            !lvg::virtual_sc26_child_slot(L"vhf\\vid_28de&pid_1302\\4&2a8f0b1c&0&vibeshinegamepad"),
+        "an unreadable or unstamped parent is rejected, not guessed");
   check(!report_descriptor_is_provisional, "the real descriptor is compiled in");
 
   // Descriptor walk: every report the real descriptor declares has to match the
