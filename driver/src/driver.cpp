@@ -2792,19 +2792,26 @@ void power_down_controllers(device_context *const context) noexcept {
   }
   unlock_context(context);
 
-  for (const auto handle : handles) {
-    if (handle != nullptr) {
-      VhfDelete(handle, TRUE);
-    }
-  }
-
-  // Stopped outside state_lock because the tick callbacks acquire it. The
-  // Steam Controller keep-alive worker restarts with the first input state
-  // after the slots are re-created.
+  // Stopped outside state_lock because the tick callbacks acquire it, and
+  // before any deletion: the keep-alive tick copies slot.vhf and counts the
+  // submission under state_lock but calls VhfReadReportSubmit outside it, so a
+  // tick admitted before the handles were nulled may still be inside VHF.
+  // Joining the worker ends that; wait_for_submits below covers the IOCTL and
+  // readiness-callback submitters, as stop_owned_controllers does. The worker
+  // restarts with the first input state after the slots are re-created.
   if (timer != nullptr) {
     WdfTimerStop(timer, TRUE);
   }
   stop_sc26_keepalive(context);
+
+  for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {
+    if (handles[index] != nullptr) {
+      // Nothing new can start: the handle is gone from the slot and the slot
+      // is Stopping. Let a submission that already copied it return first.
+      wait_for_submits(context, context->controllers[index]);
+      VhfDelete(handles[index], TRUE);
+    }
+  }
 
   lock_context(context);
   for (std::uint32_t index = 0; index < lvg::k_max_controllers; ++index) {

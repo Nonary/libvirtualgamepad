@@ -575,6 +575,57 @@ void test_concurrent_teardown() {
     CHECK(deletes == 1); CHECK(f.context.controllers[0].state == slot_state::empty);
   }
 }
+
+// D0 exit must not delete a handle while a submission that copied it is still
+// inside VhfReadReportSubmit. The IOCTL path, the readiness callback and the
+// keep-alive tick all count the submission under state_lock and call VHF outside
+// it; the fake blocks there after admission while power-down runs concurrently.
+void test_power_down_waits_for_in_flight_submit() {
+  using namespace std::chrono_literals;
+  fixture f;
+  CHECK(f.create(lvg::profile::switch_pro) == STATUS_SUCCESS);
+  auto &slot = f.context.controllers[0];
+  VHFHANDLE h = handles.back().get();
+  // Drain what creation queued so the credit below is spent by our submission.
+  for (int before = -1; before != submits;) { before = submits; ready(h); }
+  CHECK(slot.pump.ready());
+
+  std::atomic<bool> inside {false}, release {false};
+  on_submit = [&](VHFHANDLE) {
+    inside = true;
+    while (!release) std::this_thread::yield();
+  };
+  // A handshake reply is taken and submitted outside state_lock; the submit blocks.
+  auto submitter = std::async(std::launch::async, [&] { CHECK(output(slot) == STATUS_SUCCESS); });
+  auto deadline = std::chrono::steady_clock::now() + 3s;
+  while (!inside && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+  CHECK(inside);
+  const int submitted = submits;
+
+  auto teardown = std::async(std::launch::async, [&] { CHECK(evt_d0_exit(&f.device, 0) == STATUS_SUCCESS); });
+  // Power-down retires the handle from the slot before it may delete it; once
+  // that is visible, deletion must still wait for the blocked submission.
+  deadline = std::chrono::steady_clock::now() + 3s;
+  for (;;) {
+    lock_context(&f.context);
+    const bool retired = slot.vhf == nullptr && slot.state == slot_state::stopping;
+    unlock_context(&f.context);
+    if (retired || std::chrono::steady_clock::now() >= deadline) { CHECK(retired); break; }
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(50ms);
+  CHECK(deletes == 0);
+  CHECK(teardown.wait_for(0ms) == std::future_status::timeout);
+
+  release = true;
+  submitter.get();
+  teardown.get();
+  CHECK(deletes == 1); CHECK(submits == submitted);
+  lock_context(&f.context);
+  CHECK(slot.submits_in_flight == 0); CHECK(slot.state == slot_state::lost);
+  unlock_context(&f.context);
+  on_submit = {};
+}
 } // namespace
 
 NTSTATUS VhfCreate(VHF_CONFIG *config, VHFHANDLE *out) {
@@ -704,6 +755,7 @@ int main(int argc, char **argv) {
     test_disabled_keyboard_mouse();
     test_power_lifecycle(); test_profiles(); test_start_rollback(); test_prestart_failures();
     test_reentrant_reads(); test_callback_admission(); test_release_restart(); test_concurrent_teardown();
+    test_power_down_waits_for_in_flight_submit();
     std::printf("VHF production lifecycle: %d checks, %d failures\n", checks.load(), failures.load());
   } else {
     std::fprintf(stderr, "usage: %s [--initialization-only]\n", argv[0]);
