@@ -46,6 +46,10 @@ param(
     [string] $OutputDir = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'captures'),
     [ValidatePattern('^[0-9A-Fa-f]{4}$')]
     [string] $VendorId = '28DE',
+    # The wired Steam Controller (2026). A descriptor of another product of the vendor is not the
+    # controller and is never exported as its traffic.
+    [ValidatePattern('^[0-9A-Fa-f]{4}$')]
+    [string] $ProductId = '1302',
     [string] $UsbPcapCmd = 'C:\Program Files\USBPcap\USBPcapCMD.exe',
     [string] $TShark = 'C:\Program Files\Wireshark\tshark.exe',
     # Seconds to keep recording after the controller enumerates (Plugin phase).
@@ -134,25 +138,34 @@ function Invoke-TShark {
 }
 
 function Test-ControllerPresent {
-    [bool] (Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match "USB\\VID_$VendorId" } | Select-Object -First 1)
+    [bool] (Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match "USB\\VID_$VendorId&PID_$ProductId" } | Select-Object -First 1)
 }
 
 # Frames carrying a device descriptor from our vendor -> device address on that hub.
-# The one VID_$VendorId device in tshark descriptor rows (address|idProduct|bcdDevice|bNumInterfaces),
-# or $null when there is none. Two addresses mean two devices of the vendor on the hub (or a
-# re-enumeration under a new address): the frames cannot be attributed to the controller, so
-# nothing is written rather than the first match being taken.
+# The one VID_$VendorId PID_$ProductId device in tshark descriptor rows (address|idProduct|bcdDevice|
+# bNumInterfaces), or $null when there is none. Rows of another product of the vendor are named in a
+# warning and never selected: a sole other Valve device is not the controller. Two addresses of the
+# controller mean two units (or a re-enumeration under a new address): the frames cannot be
+# attributed, so nothing is written rather than the first match being taken.
 function Select-ControllerDevice {
     param([string[]] $Rows)
     $devices = @{}
+    $others = @{}
     foreach ($row in @($Rows)) {
         $f = "$row" -split '\|'
         if ($f.Count -lt 3 -or -not $f[0]) { continue }
         $address = [int] $f[0]
+        # tshark prints idProduct as 0x1302; accept the bare hex form too.
+        $product = ($f[1] -replace '^0[xX]', '').ToUpperInvariant()
+        if ($product -ne $ProductId.ToUpperInvariant()) { $others[$address] = $f[1]; continue }
         if (-not $devices.ContainsKey($address)) { $devices[$address] = [pscustomobject]@{ Address = $address; ProductId = $f[1]; BcdDevice = $f[2] } }
     }
+    if ($others.Count -gt 0) {
+        $list = ($others.GetEnumerator() | Sort-Object Name | ForEach-Object { "address $($_.Key) idProduct $($_.Value)" }) -join '; '
+        Write-Warning "VID_$VendorId device(s) that are not PID_$ProductId in the capture ($list): not the controller, not exported. Pass -ProductId for a different unit."
+    }
     if ($devices.Count -gt 1) {
-        throw "Ambiguous capture: $($devices.Count) VID_$VendorId devices (USB addresses $(($devices.Keys | Sort-Object) -join ', ')). Capture again with only the controller connected."
+        throw "Ambiguous capture: $($devices.Count) VID_$VendorId PID_$ProductId devices (USB addresses $(($devices.Keys | Sort-Object) -join ', ')). Capture again with only the controller connected."
     }
     if ($devices.Count -eq 1) { return @($devices.Values)[0] }
     return $null
@@ -181,17 +194,48 @@ function Get-FramePayloadHex {
     return (($bytes | Select-Object -Skip $headerLen) -join '')
 }
 
+# Every file this run writes under $OutputDir, by name, for the staging hint at the end. Only
+# these are offered; a directory scan could pick up another run's leftovers (a stale .json.zip
+# next to this run's small .json, an old descriptor dump) and recommend them alongside.
+$script:Emitted = New-Object System.Collections.Generic.List[string]
+function Register-Artifact {
+    param([string] $Path)
+    $leaf = Split-Path -Leaf $Path
+    if (-not $script:Emitted.Contains($leaf)) { $script:Emitted.Add($leaf) }
+}
+function Unregister-Artifact {
+    param([string] $Path)
+    [void] $script:Emitted.Remove((Split-Path -Leaf $Path))
+}
+
 function Export-Json {
     param([string] $Pcap, [string] $JsonPath)
     Write-Information "Exporting packet dissections as JSON -> $JsonPath (this can take a while)"
     & $TShark -r $Pcap -T json 2>$null | Out-File -FilePath $JsonPath -Encoding utf8
-    $mb = [math]::Round((Get-Item $JsonPath).Length / 1MB, 1)
+    Complete-JsonExport -JsonPath $JsonPath
+}
+# Keeps the fresh JSON or, past 90 MB, its .zip, and registers only the kept file. The other
+# form left by an earlier run (a stale .zip next to a small fresh .json, or a stale .json next to
+# a fresh .zip) is removed so the directory holds this run's export alone.
+function Complete-JsonExport {
+    param([string] $JsonPath)
+    $zipPath = "$JsonPath.zip"
+    $mb = [math]::Round((Get-Item -LiteralPath $JsonPath).Length / 1MB, 1)
     Write-Information "  $mb MB"
     if ($mb -gt 90) {
         Write-Warning "$JsonPath is larger than GitHub's 100 MB file limit allows comfortably; compressing to .zip and removing the .json."
-        Compress-Archive -Path $JsonPath -DestinationPath "$JsonPath.zip" -Force
-        Remove-Item $JsonPath
+        Compress-Archive -Path $JsonPath -DestinationPath $zipPath -Force
+        Remove-Item -LiteralPath $JsonPath
+        Unregister-Artifact $JsonPath
+        Register-Artifact $zipPath
+        return
     }
+    if (Test-Path -LiteralPath $zipPath) {
+        Write-Warning "Removing $zipPath from an earlier run: this run's export is the uncompressed $(Split-Path -Leaf $JsonPath)."
+        Remove-Item -LiteralPath $zipPath
+    }
+    Unregister-Artifact $zipPath
+    Register-Artifact $JsonPath
 }
 
 function Write-PluginArtifacts {
@@ -202,6 +246,7 @@ function Write-PluginArtifacts {
     Write-Information "Controller: address $addr, idProduct $($dev.ProductId), bcdDevice $($dev.BcdDevice)"
 
     Invoke-TShark @('-r', $Pcap, '-Y', "usb.device_address == $addr", '-w', $Pcapng, '-F', 'pcapng') | Out-Null
+    Register-Artifact $Pcapng
     Write-Information "Wrote $Pcapng (controller frames only)"
     # The full hub capture holds every device on that hub. It stays where it was recorded (the
     # private capture directory, or the -FromPcap source) and is never placed under captures/.
@@ -238,12 +283,14 @@ function Write-PluginArtifacts {
         $n++
         $path = Join-Path $OutputDir "sc26-report-descriptor-$n.hex"
         $hex.ToLowerInvariant() | Set-Content -Path $path -Encoding ascii -NoNewline
+        Register-Artifact $path
         $summary.Add("report desc $n : frame $($f[0]), wIndex(interface)=$($f[1]), $($hex.Length / 2) bytes -> $(Split-Path -Leaf $path)")
         Write-Information "Report descriptor $n ($($hex.Length / 2) bytes) -> $path"
     }
     if ($n -eq 0) { Write-Warning "No HID report descriptor frames found. Was the controller plugged in *after* the capture started?" }
 
     $summary | Set-Content -Path (Join-Path $OutputDir 'sc26-plugin-summary.txt') -Encoding utf8
+    Register-Artifact 'sc26-plugin-summary.txt'
     $summary | ForEach-Object { Write-Information "  $_" }
 }
 
@@ -255,6 +302,7 @@ function Write-SteamArtifacts {
     }
     $filter = "usb.device_address == $($dev.Address)"
     Invoke-TShark @('-r', $Pcap, '-Y', $filter, '-w', $Pcapng, '-F', 'pcapng') | Out-Null
+    Register-Artifact $Pcapng
     Write-Information "Wrote $Pcapng"
 
     $control = Join-Path $OutputDir 'sc26-steam-control.tsv'
@@ -278,10 +326,12 @@ function Write-SteamArtifacts {
         $ctrlLines.Add(($f[0], $f[1], $f[2], $f[3], $bRequest, $f[6], $wIndex, $wLength, $f[11], $f[12], $f[13], $payload) -join "`t")
     }
     $ctrlLines | Set-Content $control -Encoding utf8
+    Register-Artifact $control
 
     $interrupt = Join-Path $OutputDir 'sc26-steam-interrupt.tsv'
     # usbhid claims HID interrupt payloads (usbhid.data); usb.capdata is only set when it does not.
     "frame`ttime`tendpoint`tdir`tpayload`tpayload_raw" | Set-Content $interrupt -Encoding utf8
+    Register-Artifact $interrupt
     Invoke-TShark @('-r', $Pcapng, '-Y', 'usb.transfer_type == 0x01 && usb.data_len > 0', '-T', 'fields',
         '-e', 'frame.number', '-e', 'frame.time_relative', '-e', 'usb.endpoint_address', '-e', 'usb.irp_info.direction', '-e', 'usbhid.data', '-e', 'usb.capdata', '-E', 'separator=/t') | Add-Content $interrupt -Encoding utf8
 
@@ -298,6 +348,7 @@ function Write-SteamArtifacts {
         "$($f[2]) dir=$($f[3]) report_id=0x$($payload.Substring(0, [math]::Min(2, $payload.Length))) len=$($payload.Length / 2)" } | Group-Object | Sort-Object Name
     foreach ($g in $byEpId) { $summary.Add("  $($g.Name): $($g.Count)") }
     $summary | Set-Content -Path (Join-Path $OutputDir 'sc26-steam-summary.txt') -Encoding utf8
+    Register-Artifact 'sc26-steam-summary.txt'
     $summary | ForEach-Object { Write-Information "  $_" }
 }
 
@@ -332,12 +383,14 @@ switch ($Phase) {
         Write-Information "Reprocessing $raw"
         if ((Split-Path -Leaf $raw) -match '^(USBPcap\d+)') {
             "\\.\$($Matches[1])" | Set-Content $interfaceFile -Encoding ascii -NoNewline
+            Register-Artifact $interfaceFile
         } else { Write-Warning "Cannot tell the hub from the file name; -Phase Steam will capture every hub." }
         Write-PluginArtifacts -Pcap $raw -Pcapng (Join-Path $OutputDir 'sc26-plugin.pcapng')
         Export-Json -Pcap (Join-Path $OutputDir 'sc26-plugin.pcapng') -JsonPath (Join-Path $OutputDir 'sc26-plugin.json')
         $hidScript = Join-Path $PSScriptRoot 'Get-SteamControllerHid.ps1'
         if (Test-ControllerPresent) {
             & $hidScript -VendorId $VendorId | Tee-Object -FilePath (Join-Path $OutputDir 'steam-controller-hid.txt') | Out-Null
+            Register-Artifact 'steam-controller-hid.txt'
             Write-Information "Wrote $(Join-Path $OutputDir 'steam-controller-hid.txt')"
         } else {
             Write-Warning "Controller not connected: plug it in and run `"$hidScript | Tee-Object $(Join-Path $OutputDir 'steam-controller-hid.txt')`" for the HID inventory."
@@ -375,12 +428,14 @@ switch ($Phase) {
         $chosen = $chosen[0]
         Write-Information "Controller is on $chosen"
         $chosen | Set-Content $interfaceFile -Encoding ascii -NoNewline
+        Register-Artifact $interfaceFile
 
         Write-PluginArtifacts -Pcap $procs[$chosen].File -Pcapng (Join-Path $OutputDir 'sc26-plugin.pcapng')
         Export-Json -Pcap (Join-Path $OutputDir 'sc26-plugin.pcapng') -JsonPath (Join-Path $OutputDir 'sc26-plugin.json')
 
         $hidScript = Join-Path $PSScriptRoot 'Get-SteamControllerHid.ps1'
         & $hidScript -VendorId $VendorId | Tee-Object -FilePath (Join-Path $OutputDir 'steam-controller-hid.txt') | Out-Null
+        Register-Artifact 'steam-controller-hid.txt'
         Write-Information "Wrote $(Join-Path $OutputDir 'steam-controller-hid.txt')"
     }
     'Steam' {
@@ -429,16 +484,10 @@ switch ($Phase) {
 
 Write-Host ''
 $rawNote = if ($FromPcap) { '' } else { "Raw hub captures stay in $tmp (every device on the hub; do not commit them). " }
-# Only the filtered, per-device artifacts this phase wrote are offered for staging, by name:
-# never the directory, which may hold raw .pcap files or another phase's leftovers.
-$phaseNames = if ($Phase -eq 'Plugin') {
-    @('sc26-plugin.pcapng', 'sc26-plugin.json', 'sc26-plugin.json.zip', 'sc26-plugin-summary.txt', 'steam-controller-hid.txt', 'usbpcap-interface.txt')
-} else {
-    @('sc26-steam.pcapng', 'sc26-steam.json', 'sc26-steam.json.zip', 'sc26-steam-control.tsv', 'sc26-steam-interrupt.tsv', 'sc26-steam-summary.txt')
-}
-$staged = @(Get-ChildItem -LiteralPath $OutputDir -File | Where-Object {
-    $_.Extension -ne '.pcap' -and ($phaseNames -contains $_.Name -or ($Phase -eq 'Plugin' -and $_.Name -like 'sc26-report-descriptor-*.hex'))
-} | ForEach-Object { "captures/$($_.Name)" })
+# Only the filtered, per-device artifacts this run wrote (Register-Artifact) are offered for
+# staging, by name: never a directory scan, which could pick up raw .pcap files or an earlier
+# run's leftovers such as a stale .json.zip.
+$staged = @($script:Emitted | Where-Object { $_ -notlike '*.pcap' } | ForEach-Object { "captures/$_" })
 Write-Host "Done. ${rawNote}Review $OutputDir, then stage the filtered artifacts only:" -ForegroundColor Green
 Write-Host "  git add $($staged -join ' ')" -ForegroundColor Green
 Write-Host "  git commit -m 'captures: Steam Controller (2026) $($Phase.ToLower()) capture'" -ForegroundColor Green

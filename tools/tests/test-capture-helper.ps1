@@ -64,7 +64,8 @@ foreach ($pair in @(@('Capture-SteamController.ps1', $text), @('Get-SteamControl
 Check ($text -notmatch 'Copy-Item \$Pcap') 'the full hub capture is not copied into the output directory'
 Check ($text -notmatch "'usb'\s*\}") 'no unfiltered "usb" display filter fallback remains'
 Check ($text -notmatch 'git add captures') 'the staging hint does not add the whole captures directory'
-Check ($text -match "\`$_\.Extension -ne '\.pcap'") 'raw .pcap files are excluded from the staging hint'
+Check ($text -match "-notlike '\*\.pcap'") 'raw .pcap files are excluded from the staging hint'
+Check ($text -match '\$script:Emitted' -and $text -notmatch 'Get-ChildItem -LiteralPath \$OutputDir -File') 'the staging hint lists the files this run registered, not a directory scan'
 $ignore = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\.gitignore') -Raw
 Check ($ignore -match '(?m)^/captures/\*\.pcap\s*$') 'raw .pcap hub captures under captures/ are gitignored'
 
@@ -75,17 +76,62 @@ $selStart = $text.IndexOf('function Select-ControllerDevice')
 $selEnd = $text.IndexOf('function ', $selStart + 1)
 Check ($selStart -ge 0 -and $selEnd -gt $selStart) 'Select-ControllerDevice is present'
 $VendorId = '28DE'
+$ProductId = '1302'
 Invoke-Expression $text.Substring($selStart, $selEnd - $selStart)
+# Product identity: the vendor filter alone would accept a sole other Valve device as the controller.
+Check ($text -match "ValidatePattern\('\^\[0-9A-Fa-f\]\{4\}\$'\)\]\s*\r?\n\s*\[string\] \`$ProductId = '1302'") 'the script takes the controller product id (default 1302) validated as four hex digits'
+Check ($text -match 'USB\\\\VID_\$VendorId&PID_\$ProductId') 'the PnP presence check matches the product, not the vendor alone'
+Check ($text -match 'if \(-not \(Find-ControllerAddress -Pcap \$raw\)\) \{ throw') 'the -FromPcap Plugin reprocess refuses a capture without the controller descriptor'
+$WarningPreference = 'SilentlyContinue'
+Check ($null -eq (Select-ControllerDevice -Rows @('4|0x1304|0x0100|1'))) 'a sole other product of the vendor (the puck) is not selected'
+Check ($null -eq (Select-ControllerDevice -Rows @('4|0x1304|0x0100|1', '5|0x1205|0x0100|1'))) 'several other products of the vendor select nothing'
+$mixed = Select-ControllerDevice -Rows @('4|0x1304|0x0100|1', '3|0x1302|0x0307|1')
+Check ($null -ne $mixed -and $mixed.Address -eq 3) 'the controller is selected next to another product of the vendor'
+Check ($null -ne (Select-ControllerDevice -Rows @('3|1302|0x0307|1'))) 'the bare hex product form is accepted'
+$WarningPreference = 'Continue'
 $one = Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '3|0x1302|0x0307|1')
 Check ($null -ne $one -and $one.Address -eq 3 -and $one.ProductId -eq '0x1302' -and $one.BcdDevice -eq '0x0307') 'a single device whose descriptor was seen twice is selected once'
 Check ($null -eq (Select-ControllerDevice -Rows @())) 'no descriptor rows select nothing'
 Check ($null -eq (Select-ControllerDevice -Rows @('', '|0x1302|0x0307|1', '7'))) 'rows without an address or incomplete rows select nothing'
-$refused = $false
-try { Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '5|0x1142|0x0100|1') | Out-Null } catch { $refused = $_.Exception.Message -match 'Ambiguous capture: 2 VID_28DE devices' }
-Check $refused 'two devices of the vendor on one hub are refused instead of the first being taken'
+$mixedOut = @(Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '5|0x1142|0x0100|1') 3>&1)
+$warned = @($mixedOut | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+$beside = @($mixedOut | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+Check ($beside.Count -eq 1 -and $beside[0].Address -eq 3 -and $warned.Count -eq 1 -and "$($warned[0])" -match 'address 5 idProduct 0x1142') 'another product of the vendor beside the controller is named in a warning and never selected'
 $refused = $false
 try { Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '4|0x1302|0x0307|1') | Out-Null } catch { $refused = $_.Exception.Message -match 'USB addresses 3, 4' }
 Check $refused 'the same product under two addresses (re-enumeration) is refused too'
+# The staging list is built from the files this run wrote. A stale .json.zip from an earlier run
+# next to this run's small .json must neither be listed nor left behind.
+foreach ($fn in @('Register-Artifact', 'Unregister-Artifact', 'Complete-JsonExport')) {
+    $s = $text.IndexOf("function $fn")
+    $e = $text.IndexOf("`nfunction ", $s + 1)
+    if ($e -lt 0) { $e = $text.IndexOf("`n`n", $s) }
+    Check ($s -ge 0 -and $e -gt $s) "$fn is present"
+    Invoke-Expression $text.Substring($s, $e - $s)
+}
+$script:Emitted = New-Object System.Collections.Generic.List[string]
+$InformationPreference = 'SilentlyContinue'
+$stage = Join-Path ([System.IO.Path]::GetTempPath()) ("capture-helper-test-" + [System.IO.Path]::GetRandomFileName().Replace('.', ''))
+New-Item -ItemType Directory -Path $stage | Out-Null
+try {
+    $json = Join-Path $stage 'sc26-steam.json'
+    Set-Content -LiteralPath "$json.zip" -Value 'stale archive from the unfiltered days' -Encoding ascii
+    Set-Content -LiteralPath $json -Value '[]' -Encoding ascii
+    $WarningPreference = 'SilentlyContinue'
+    Complete-JsonExport -JsonPath $json
+    $WarningPreference = 'Continue'
+    Check ((-not (Test-Path -LiteralPath "$json.zip")) -and (Test-Path -LiteralPath $json)) 'a small fresh export removes the stale .json.zip of an earlier run'
+    Check ($script:Emitted.Count -eq 1 -and $script:Emitted[0] -eq 'sc26-steam.json') 'only the fresh .json is registered for staging'
+    Register-Artifact (Join-Path $stage 'sc26-steam.pcapng'); Register-Artifact (Join-Path $stage 'sc26-steam.pcapng')
+    Check ($script:Emitted.Count -eq 2) 'registering the same artifact twice lists it once'
+    Unregister-Artifact (Join-Path $stage 'sc26-steam.pcapng')
+    Check ($script:Emitted.Count -eq 1 -and -not $script:Emitted.Contains('sc26-steam.pcapng')) 'an artifact can be withdrawn from the list'
+}
+finally {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    $InformationPreference = 'Continue'
+}
+
 $steamStart = $text.IndexOf("'Steam' {")
 $steamBlock = $text.Substring($steamStart)
 Check ($steamBlock -notmatch '\$candidates\.Count -eq 1 -or') 'the single Plugin-phase hub is not accepted without identifying the controller'
