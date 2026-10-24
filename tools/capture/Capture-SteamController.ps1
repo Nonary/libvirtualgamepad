@@ -138,14 +138,29 @@ function Test-ControllerPresent {
 }
 
 # Frames carrying a device descriptor from our vendor -> device address on that hub.
+# The one VID_$VendorId device in tshark descriptor rows (address|idProduct|bcdDevice|bNumInterfaces),
+# or $null when there is none. Two addresses mean two devices of the vendor on the hub (or a
+# re-enumeration under a new address): the frames cannot be attributed to the controller, so
+# nothing is written rather than the first match being taken.
+function Select-ControllerDevice {
+    param([string[]] $Rows)
+    $devices = @{}
+    foreach ($row in @($Rows)) {
+        $f = "$row" -split '\|'
+        if ($f.Count -lt 3 -or -not $f[0]) { continue }
+        $address = [int] $f[0]
+        if (-not $devices.ContainsKey($address)) { $devices[$address] = [pscustomobject]@{ Address = $address; ProductId = $f[1]; BcdDevice = $f[2] } }
+    }
+    if ($devices.Count -gt 1) {
+        throw "Ambiguous capture: $($devices.Count) VID_$VendorId devices (USB addresses $(($devices.Keys | Sort-Object) -join ', ')). Capture again with only the controller connected."
+    }
+    if ($devices.Count -eq 1) { return @($devices.Values)[0] }
+    return $null
+}
 function Find-ControllerAddress {
     param([string] $Pcap)
     $rows = Invoke-TShark @('-r', $Pcap, '-Y', "usb.idVendor == 0x$VendorId", '-T', 'fields', '-e', 'usb.device_address', '-e', 'usb.idProduct', '-e', 'usb.bcdDevice', '-e', 'usb.bNumInterfaces', '-E', 'separator=|')
-    foreach ($row in @($rows)) {
-        $f = "$row" -split '\|'
-        if ($f.Count -ge 3 -and $f[0]) { return [pscustomobject]@{ Address = [int] $f[0]; ProductId = $f[1]; BcdDevice = $f[2] } }
-    }
-    return $null
+    return Select-ControllerDevice -Rows @($rows)
 }
 
 # Raw payload of a frame, as a hex string, without the USBPcap pseudo-header (whose first two
@@ -188,8 +203,8 @@ function Write-PluginArtifacts {
 
     Invoke-TShark @('-r', $Pcap, '-Y', "usb.device_address == $addr", '-w', $Pcapng, '-F', 'pcapng') | Out-Null
     Write-Information "Wrote $Pcapng (controller frames only)"
-    # Keep the full raw capture too, in case the hub-level context matters.
-    Copy-Item $Pcap (Join-Path $OutputDir 'sc26-plugin-allhub.pcap') -Force
+    # The full hub capture holds every device on that hub. It stays where it was recorded (the
+    # private capture directory, or the -FromPcap source) and is never placed under captures/.
 
     $summary = New-Object System.Collections.Generic.List[string]
     $summary.Add("Steam Controller plug-in capture, $(Get-Date -Format s)")
@@ -235,7 +250,10 @@ function Write-PluginArtifacts {
 function Write-SteamArtifacts {
     param([string] $Pcap, [string] $Pcapng)
     $dev = Find-ControllerAddress -Pcap $Pcap
-    $filter = if ($dev) { "usb.device_address == $($dev.Address)" } else { Write-Warning 'No injected device descriptor found; keeping every frame on the hub.'; 'usb' }
+    if (-not $dev) {
+        throw "No VID_$VendorId device descriptor in $Pcap, so its frames cannot be attributed to the controller. Nothing was written: an unfiltered hub capture would carry every other device on that hub. The Steam phase injects the descriptors of connected devices; run -Phase Plugin first, or pass a hub capture that contains the descriptor with -FromPcap."
+    }
+    $filter = "usb.device_address == $($dev.Address)"
     Invoke-TShark @('-r', $Pcap, '-Y', $filter, '-w', $Pcapng, '-F', 'pcapng') | Out-Null
     Write-Information "Wrote $Pcapng"
 
@@ -347,12 +365,14 @@ switch ($Phase) {
         Start-Sleep -Seconds $SettleSeconds
         foreach ($p in $procs.Values) { Stop-ConsoleProcess $p.Process }
 
-        $chosen = $null
+        $chosen = @()
         foreach ($i in $interfaces) {
             $file = $procs[$i].File
-            if ((Get-Item $file -ErrorAction SilentlyContinue).Length -gt 24 -and (Find-ControllerAddress -Pcap $file)) { $chosen = $i; break }
+            if ((Get-Item $file -ErrorAction SilentlyContinue).Length -gt 24 -and (Find-ControllerAddress -Pcap $file)) { $chosen += $i }
         }
-        if (-not $chosen) { throw "None of the hub captures in $tmp contains a VID_$VendorId device descriptor. Check the cable/port and retry." }
+        if ($chosen.Count -eq 0) { throw "None of the hub captures in $tmp contains a VID_$VendorId device descriptor. Check the cable/port and retry." }
+        if ($chosen.Count -gt 1) { throw "Hubs $($chosen -join ', ') all saw a VID_$VendorId device: the controller cannot be told apart. Capture again with only the controller connected." }
+        $chosen = $chosen[0]
         Write-Information "Controller is on $chosen"
         $chosen | Set-Content $interfaceFile -Encoding ascii -NoNewline
 
@@ -393,17 +413,32 @@ switch ($Phase) {
         Read-Host | Out-Null
         foreach ($p in $procs.Values) { Stop-ConsoleProcess $p.Process }
 
-        $chosen = $null
+        # Every candidate must identify the controller by its injected descriptor, the single
+        # hub from the Plugin phase included: Write-SteamArtifacts filters by that address only.
+        $chosen = @()
         foreach ($i in $candidates) {
             $file = $procs[$i].File
-            if ((Get-Item $file -ErrorAction SilentlyContinue).Length -gt 24 -and ($candidates.Count -eq 1 -or (Find-ControllerAddress -Pcap $file))) { $chosen = $i; break }
+            if ((Get-Item $file -ErrorAction SilentlyContinue).Length -gt 24 -and (Find-ControllerAddress -Pcap $file)) { $chosen += $i }
         }
-        if (-not $chosen) { throw "No capture in $tmp contains the controller." }
-        Write-SteamArtifacts -Pcap $procs[$chosen].File -Pcapng (Join-Path $OutputDir 'sc26-steam.pcapng')
+        if ($chosen.Count -eq 0) { throw "No capture in $tmp contains a VID_$VendorId device descriptor, so the controller's frames cannot be told from the hub's other devices. Nothing was written." }
+        if ($chosen.Count -gt 1) { throw "Hubs $($chosen -join ', ') all saw a VID_$VendorId device: the controller cannot be told apart. Capture again with only the controller connected." }
+        Write-SteamArtifacts -Pcap $procs[$chosen[0]].File -Pcapng (Join-Path $OutputDir 'sc26-steam.pcapng')
         Export-Json -Pcap (Join-Path $OutputDir 'sc26-steam.pcapng') -JsonPath (Join-Path $OutputDir 'sc26-steam.json')
     }
 }
 
 Write-Host ''
-$rawNote = if ($FromPcap) { '' } else { "Raw hub captures are in $tmp. " }
-Write-Host "Done. ${rawNote}Review $OutputDir, then: git add captures; git commit -m 'captures: Steam Controller (2026) $($Phase.ToLower()) capture'" -ForegroundColor Green
+$rawNote = if ($FromPcap) { '' } else { "Raw hub captures stay in $tmp (every device on the hub; do not commit them). " }
+# Only the filtered, per-device artifacts this phase wrote are offered for staging, by name:
+# never the directory, which may hold raw .pcap files or another phase's leftovers.
+$phaseNames = if ($Phase -eq 'Plugin') {
+    @('sc26-plugin.pcapng', 'sc26-plugin.json', 'sc26-plugin.json.zip', 'sc26-plugin-summary.txt', 'steam-controller-hid.txt', 'usbpcap-interface.txt')
+} else {
+    @('sc26-steam.pcapng', 'sc26-steam.json', 'sc26-steam.json.zip', 'sc26-steam-control.tsv', 'sc26-steam-interrupt.tsv', 'sc26-steam-summary.txt')
+}
+$staged = @(Get-ChildItem -LiteralPath $OutputDir -File | Where-Object {
+    $_.Extension -ne '.pcap' -and ($phaseNames -contains $_.Name -or ($Phase -eq 'Plugin' -and $_.Name -like 'sc26-report-descriptor-*.hex'))
+} | ForEach-Object { "captures/$($_.Name)" })
+Write-Host "Done. ${rawNote}Review $OutputDir, then stage the filtered artifacts only:" -ForegroundColor Green
+Write-Host "  git add $($staged -join ' ')" -ForegroundColor Green
+Write-Host "  git commit -m 'captures: Steam Controller (2026) $($Phase.ToLower()) capture'" -ForegroundColor Green

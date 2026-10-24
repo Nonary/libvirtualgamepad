@@ -58,5 +58,38 @@ foreach ($pair in @(@('Capture-SteamController.ps1', $text), @('Get-SteamControl
     Check ($pair[1] -match "ValidatePattern\('\^\[0-9A-Fa-f\]\{4\}\$'\)\]\s*\r?\n\s*\[string\] \`$VendorId") "$($pair[0]) validates -VendorId as four hex digits"
 }
 
+# Raw captures and attribution: the full hub capture is never copied under captures/, the Steam
+# phase never falls back to an unfiltered "usb" display filter, the final hint stages an explicit
+# file list instead of the directory, and the raw names are ignored by git.
+Check ($text -notmatch 'Copy-Item \$Pcap') 'the full hub capture is not copied into the output directory'
+Check ($text -notmatch "'usb'\s*\}") 'no unfiltered "usb" display filter fallback remains'
+Check ($text -notmatch 'git add captures') 'the staging hint does not add the whole captures directory'
+Check ($text -match "\`$_\.Extension -ne '\.pcap'") 'raw .pcap files are excluded from the staging hint'
+$ignore = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\.gitignore') -Raw
+Check ($ignore -match '(?m)^/captures/\*\.pcap\s*$') 'raw .pcap hub captures under captures/ are gitignored'
+
+# Device attribution over synthetic tshark descriptor rows (address|idProduct|bcdDevice|
+# bNumInterfaces): one device is selected, none selects nothing, and a second device of the
+# vendor on the same hub is refused instead of the first one being taken.
+$selStart = $text.IndexOf('function Select-ControllerDevice')
+$selEnd = $text.IndexOf('function ', $selStart + 1)
+Check ($selStart -ge 0 -and $selEnd -gt $selStart) 'Select-ControllerDevice is present'
+$VendorId = '28DE'
+Invoke-Expression $text.Substring($selStart, $selEnd - $selStart)
+$one = Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '3|0x1302|0x0307|1')
+Check ($null -ne $one -and $one.Address -eq 3 -and $one.ProductId -eq '0x1302' -and $one.BcdDevice -eq '0x0307') 'a single device whose descriptor was seen twice is selected once'
+Check ($null -eq (Select-ControllerDevice -Rows @())) 'no descriptor rows select nothing'
+Check ($null -eq (Select-ControllerDevice -Rows @('', '|0x1302|0x0307|1', '7'))) 'rows without an address or incomplete rows select nothing'
+$refused = $false
+try { Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '5|0x1142|0x0100|1') | Out-Null } catch { $refused = $_.Exception.Message -match 'Ambiguous capture: 2 VID_28DE devices' }
+Check $refused 'two devices of the vendor on one hub are refused instead of the first being taken'
+$refused = $false
+try { Select-ControllerDevice -Rows @('3|0x1302|0x0307|1', '4|0x1302|0x0307|1') | Out-Null } catch { $refused = $_.Exception.Message -match 'USB addresses 3, 4' }
+Check $refused 'the same product under two addresses (re-enumeration) is refused too'
+$steamStart = $text.IndexOf("'Steam' {")
+$steamBlock = $text.Substring($steamStart)
+Check ($steamBlock -notmatch '\$candidates\.Count -eq 1 -or') 'the single Plugin-phase hub is not accepted without identifying the controller'
+Check ($steamBlock -match '\$chosen\.Count -gt 1') 'several hubs seeing the vendor are refused in the Steam phase'
+
 if ($failures -ne 0) { throw "$failures capture-helper gate(s) failed" }
 Write-Host 'capture helper gates passed'
