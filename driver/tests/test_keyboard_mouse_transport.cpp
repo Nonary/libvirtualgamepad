@@ -96,6 +96,10 @@ struct fixture {
     forced_reply_error=0;on_reply={};
     on_create=on_start=on_delete=on_submit=on_before_submit={}; on_controller_delete={};
     fake_close_hook={}; fake_missing_file=false;
+    fake_requestor_process_id=100;fake_process_open_failure=false;
+    fake_process_opens=fake_process_closes=0;
+    owner_data.opener_process_id=stranger_data.opener_process_id=100;
+    owner_data.opener_process=stranger_data.opener_process=fake_process_handle();
     fail_rundown_wait=false;failed_rundown_waits=0;
     creates=starts=deletes=submits=ioctls=opens=closes=fake_opens=fake_closes=0; handles.clear();
     delete_order.clear();mixed_keyboard_mouse_handle=nullptr;mixed_controller_handle=nullptr;
@@ -231,7 +235,46 @@ void test_keyboard_mouse_authorization() {
   fake_sid_failure = false; fake_membership_failure = true;
   CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
   fake_membership_failure = false; CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_SUCCESS);
+  // An elevated opener's credentials remain valid after duplication, but
+  // another process must be denied before malformed packet validation.
+  fake_requestor_process_id = 200;
+  control.prefix.reserved = 1;
+  for (const auto code : {lvg::km::ioctl_query, lvg::km::ioctl_open,
+       lvg::km::ioctl_close, lvg::km::ioctl_abort, lvg::km::ioctl_keyboard,
+       lvg::km::ioctl_button, lvg::km::ioctl_relative,
+       lvg::km::ioctl_absolute, lvg::km::ioctl_consumer}) {
+    CHECK(f.raw(code, &control, sizeof(control), sizeof(control)) == STATUS_ACCESS_DENIED);
+  }
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  CHECK(f.abort() == STATUS_ACCESS_DENIED); CHECK(deletes == 0);
+  fake_requestor_process_id = 0;
+  CHECK(f.abort() == STATUS_ACCESS_DENIED);
+  fake_requestor_process_id = 100;
+  f.owner_data.opener_process = nullptr;
+  CHECK(f.abort() == STATUS_ACCESS_DENIED);
+  f.owner_data.opener_process = fake_process_handle();
   CHECK(f.abort() == STATUS_SUCCESS); CHECK(deletes == 1);
+  evt_file_close(&f.owner);
+  CHECK(f.owner_data.opener_process == nullptr);
+  CHECK(f.owner_data.opener_process_id == 0); CHECK(fake_process_closes == 1);
+  fake_wdf_object create_request;
+  fake_process_open_failure = true;
+  evt_file_create(&f.device, &create_request, &f.owner);
+  CHECK(create_request.completion_status == STATUS_SUCCESS);
+  CHECK(f.open() == STATUS_ACCESS_DENIED);
+  fake_process_open_failure = false;
+  fake_requestor_process_id = 0;
+  fake_wdf_object unknown_create;
+  evt_file_create(&f.device, &unknown_create, &f.owner);
+  CHECK(f.owner_data.opener_process == nullptr);
+  CHECK(f.open() == STATUS_ACCESS_DENIED);
+  fake_requestor_process_id = 100;
+  fake_wdf_object valid_create;
+  evt_file_create(&f.device, &valid_create, &f.owner);
+  CHECK(fake_process_opens == 1);
+  CHECK(f.owner_data.opener_process_id == 100);
+  CHECK(f.owner_data.opener_process == fake_process_handle());
+  evt_file_close(&f.owner); CHECK(fake_process_closes == 2);
 }
 void test_raw_boundaries() {
   fixture f; auto control=lvg::km::request<lvg::km::control_request>();
@@ -328,7 +371,7 @@ void test_absolute_mouse_drag_transport() {
   CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_SUCCESS);
   button.pressed=0;CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_absolute_report_id);
-  CHECK(h->bytes.size()==6 && h->bytes[1]==1 && h->bytes[2]==0x34 && h->bytes[3]==0x12 && h->bytes[4]==0x78 && h->bytes[5]==0x56);
+  CHECK(h->bytes.size()==6 && h->bytes[1]==0 && h->bytes[2]==0x1a && h->bytes[3]==0x09 && h->bytes[4]==0x3c && h->bytes[5]==0x2b);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_relative_report_id && h->bytes[1]==0);
   CHECK(f.abort()==STATUS_SUCCESS);
 }
@@ -1017,11 +1060,11 @@ BOOL SetupDiGetDeviceInterfaceDetailW(HDEVINFO,SP_DEVICE_INTERFACE_DATA *,SP_DEV
 BOOL SetupDiDestroyDeviceInfoList(HDEVINFO){return TRUE;}
 HANDLE CreateFileW(const wchar_t *,DWORD access,DWORD sharing,void *,DWORD disposition,DWORD flags,HANDLE) {
   CHECK(current!=nullptr);CHECK(access==(GENERIC_READ|GENERIC_WRITE));CHECK(sharing==0);CHECK(disposition==OPEN_EXISTING);
-  CHECK(flags == (FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_CONTEXT_TRACKING));
+  CHECK(flags == (FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION | SECURITY_CONTEXT_TRACKING));
   ++opens;fake_wdf_object request;evt_file_create(&current->device,&request,&current->owner);
   return &current->owner;
 }
-BOOL CloseHandle(HANDLE handle){if(handle==fake_token_handle())return TRUE;++closes;evt_file_close(static_cast<WDFFILEOBJECT>(handle));return TRUE;}
+BOOL CloseHandle(HANDLE handle){if(handle==fake_token_handle())return TRUE;if(handle==fake_process_handle()){++fake_process_closes;return TRUE;}++closes;evt_file_close(static_cast<WDFFILEOBJECT>(handle));return TRUE;}
 BOOL DeviceIoControl(HANDLE handle,DWORD code,void *input,DWORD input_size,void *output,DWORD output_size,DWORD *bytes,void *) {
   ++ioctls;ULONG_PTR information=0;
   const auto status=current->raw(code,input,input_size,input_size,output,output_size,output_size,static_cast<WDFFILEOBJECT>(handle),&information);

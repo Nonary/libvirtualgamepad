@@ -144,7 +144,11 @@ struct keyboard_mouse_slot {
   bool pump_active;
   bool rundown_stopping;
 };
-struct keyboard_mouse_file_context { bool cleanup_started; };
+struct keyboard_mouse_file_context {
+  bool cleanup_started;
+  ULONG opener_process_id;
+  HANDLE opener_process;
+};
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(keyboard_mouse_file_context, get_keyboard_mouse_file_context);
 #endif
 
@@ -2646,7 +2650,21 @@ void evt_file_create(WDFDEVICE, WDFREQUEST request, WDFFILEOBJECT file_object) {
 #if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
   // The source's own local target may use a null/unknown file per the INF.
   // Keep its create path working; private KM IOCTLs still require a real owner.
-  if (file_object != nullptr) get_keyboard_mouse_file_context(file_object)->cleanup_started = false;
+  if (file_object != nullptr) {
+    auto *const file = get_keyboard_mouse_file_context(file_object);
+    file->cleanup_started = false;
+    file->opener_process_id = WdfRequestGetRequestorProcessId(request);
+    // Pin the opener through file close so its PID cannot be reused to
+    // authorize a process holding a duplicated device handle. The restricted
+    // UMDF host cannot acquire this reference itself: open the process with
+    // limited-query access under the explicitly granted client impersonation
+    // context. No WDF calls are made inside that callback.
+    file->opener_process = nullptr;
+    if (file->opener_process_id != 0) {
+      WdfRequestImpersonate(request, SecurityImpersonation,
+        evt_keyboard_mouse_pin_opener, file);
+    }
+  }
 #else
   static_cast<void>(file_object);
 #endif
@@ -2659,6 +2677,12 @@ void evt_file_close(WDFFILEOBJECT file_object) {
   auto *const context = get_device_context(device);
 #if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
   evt_keyboard_mouse_file_cleanup(file_object);
+  auto *const file = get_keyboard_mouse_file_context(file_object);
+  if (file->opener_process != nullptr) {
+    CloseHandle(file->opener_process);
+    file->opener_process = nullptr;
+  }
+  file->opener_process_id = 0;
 #endif
   for (std::uint32_t controller_id = 0; controller_id < lvg::k_max_controllers; ++controller_id) {
     destroy_owned_controller(context, file_object, controller_id);

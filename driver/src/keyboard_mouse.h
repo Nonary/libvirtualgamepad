@@ -62,8 +62,8 @@ class keyboard_mouse_endpoint {
   bool credit_ {};
 };
 
-// Three top-level collections: keyboard, mouse (relative and absolute reports
-// each carry button state), and consumer controls. No other VID/PID is borrowed.
+// Four top-level collections: keyboard, relative mouse (owns buttons), absolute
+// mouse (movement only), and consumer controls. No other VID/PID is borrowed.
 extern const std::uint8_t keyboard_mouse_descriptor[];
 extern const std::size_t keyboard_mouse_descriptor_size;
 } // namespace lvg::driver

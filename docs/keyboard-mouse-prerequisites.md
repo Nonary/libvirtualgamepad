@@ -8,8 +8,14 @@ older driver packages can reject that query.
 The UMDF project enables keyboard/mouse by default. It supplies zero vendor and
 product IDs, which VHF accepts as optional values; project-owned IDs can be
 provided through the project properties. The control operations are restricted
-to enabled administrators and LocalSystem, and each request is checked under
-the requesting security context. Gamepad permissions remain unchanged.
+to enabled administrators and LocalSystem. Each keyboard/mouse request must
+come from the process that opened its device handle and pass the token check.
+Duplicating or inheriting that handle into another process does not transfer
+input privileges. A retained process handle with limited-query access prevents
+reuse of an exited opener's PID until the device file closes. It is acquired
+under client impersonation, explicitly enabled by both the client and INF.
+Gamepad permissions remain
+unchanged.
 
 The endpoint implements a full-state keyboard bitmap, five mouse buttons,
 relative mouse counts, vertical and horizontal wheel detents, and consumer-page
@@ -18,9 +24,16 @@ queue carries keyboard, button, relative, absolute and consumer reports.
 Backpressure does not change held state. Disconnect cleanup emits neutral
 keyboard, button and consumer reports before deleting the child when possible.
 
-Relative and absolute pointer reports share one Mouse top-level collection and
-each carries the current button state, so a drag is not split between distinct
-mouse devices. The absolute pointer uses normalized 0..65535 coordinates in the **primary
+Relative and absolute pointer reports use separate Mouse top-level collections
+because Windows mouhid rejects duplicate X/Y capabilities in a single collection.
+Only the relative collection owns buttons, including during absolute drags; the
+absolute collection contains movement and constant padding. HID coordinates use
+0..32767 because Windows' scaled-value parser rejects the upper half of an
+unsigned 16-bit range; the control API remains normalized to 0..65535. The host
+must confirm desktop button/position delivery when crossing mouse collections,
+since submission completion acknowledges queue admission rather than OS delivery.
+The absolute pointer
+uses normalized 0..65535 coordinates in the **primary
 display** domain. The reported `primary_absolute_mouse` capability identifies
 that domain; it does not promise virtual-desktop coordinates. The host must map
 from its capture geometry and handle off-primary positions separately. This

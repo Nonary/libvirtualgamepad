@@ -74,6 +74,15 @@ inline bool fake_token_open_failure = false, fake_token_query_failure = false;
 inline bool fake_sid_failure = false, fake_membership_failure = false;
 inline bool fake_client_is_system = false, fake_client_is_admin = true;
 inline HANDLE fake_token_handle() { return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(0x7777)); }
+inline HANDLE fake_process_handle() { return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(0x8888)); }
+inline constexpr DWORD PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+inline bool fake_process_open_failure = false;
+inline int fake_process_opens = 0, fake_process_closes = 0;
+inline HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid) {
+  if (access != PROCESS_QUERY_LIMITED_INFORMATION || inherit || pid == 0 || fake_process_open_failure) return nullptr;
+  ++fake_process_opens;
+  return fake_process_handle();
+}
 inline HANDLE GetCurrentThread() { return nullptr; }
 inline BOOL OpenThreadToken(HANDLE, DWORD, BOOL, HANDLE *token) {
   if (fake_token_open_failure) return FALSE;

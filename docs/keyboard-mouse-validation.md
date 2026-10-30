@@ -76,7 +76,7 @@ These are tests of executed production bodies and observable status, ownership,
 submission, retained bytes and deletion ordering. Source-string matching is used
 only to inject deliberate mutations, not as a substitute for runtime behavior.
 
-## Still unverified
+## Remaining qualification at the original 2026-10-22 validation
 
 The local executor has no Windows SDK/WDK. No native UMDF/VhfUm driver build,
 hardware, VM, real suspend/hibernate,
@@ -87,3 +87,27 @@ that exact VhfUm contract remains unqualified. Synchronous native calls can bloc
 indefinitely. CI and the separate independent review passes must inspect the
 published head and dependency base. No release, installation, security-setting
 change, signing, migration, merge, issue closure, or nightly claim is made.
+
+## Windows live validation (2026-10-29)
+
+An isolated, locally signed UMDF/VHF test device passed on Windows
+10.0.26200. The test used a separate root ID, interface GUID, service, child
+instance and UMDF host; it removed its exact device and OEM package afterward.
+The existing production VHF device and Sunshine service remained healthy.
+
+- Standard-user direct requests and administrator-opened handles duplicated into
+  a standard-user process were denied for all nine keyboard/mouse operations.
+- Direct driver input and the extracted production Windows host adapter both
+  observed key down/up, relative movement, wheel scrolling, absolute movement,
+  mouse-button down/up, ordered absolute dragging, and consumer controls.
+- Absolute positioning was checked against the desktop cursor, rather than
+  merely accepting an absolute Raw Input flag. Windows' own HID parser confirmed
+  that the 0..32767 descriptor and encoded reports decode successfully.
+- The native MSVC build passed all 16 CTests. Host routing tests additionally
+  cover delayed mouse delivery and bounded recovery when delivery is absent.
+
+The successful local package was `build/km-isolated-package27`, manifest SHA-256
+`4D66193CFA767354B257AC03E49F5C1C42576430357965B8F4594BF6EFAEF518`.
+This validates one Windows configuration and the host adapter, not a full
+Moonlight streaming session, production driver signing/release, suspend/resume,
+Driver Verifier, or the outstanding VhfUm callback-rundown qualification.

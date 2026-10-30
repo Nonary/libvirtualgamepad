@@ -48,7 +48,7 @@ AddFilter=WUDFRd,,WUDFRd_UpperFilterPosition
 [VibeshineVhfGamepad_Install_Win10.NT.Wdf]
 UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
 UmdfServiceOrder=VibeshineVhfGamepad
-UmdfImpersonationLevel=Identification
+UmdfImpersonationLevel=Impersonation
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
@@ -86,7 +86,7 @@ Needs=WUDFRD_UpperFilter.NT.Filters
 [VibeshineVhfGamepad_Install_Win11.NT.Wdf]
 UmdfService=VibeshineVhfGamepad,VibeshineVhfGamepad_Wdf
 UmdfServiceOrder=VibeshineVhfGamepad
-UmdfImpersonationLevel=Identification
+UmdfImpersonationLevel=Impersonation
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts

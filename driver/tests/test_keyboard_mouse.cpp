@@ -38,6 +38,7 @@ void test_descriptor() {
   std::array<unsigned, 5> bits {};
   unsigned report = 0, size = 0, count = 0, page = 0, usage = 0, depth = 0, top = 0;
   int minimum = 0, maximum = 0;
+  int physical_minimum = 0, physical_maximum = 0;
   bool saw_xy = false, saw_wheel = false, saw_pan = false, saw_absolute = false;
   const auto *bytes = lvg::driver::keyboard_mouse_descriptor;
   const auto length = lvg::driver::keyboard_mouse_descriptor_size;
@@ -54,6 +55,8 @@ void test_descriptor() {
     if (tag == 0x08) usage = value;
     if (tag == 0x14) minimum = n == 1 ? static_cast<std::int8_t>(value) : n == 2 ? static_cast<std::int16_t>(value) : static_cast<int>(value);
     if (tag == 0x24) maximum = minimum < 0 ? (n == 1 ? static_cast<std::int8_t>(value) : n == 2 ? static_cast<std::int16_t>(value) : static_cast<int>(value)) : static_cast<int>(value);
+    if (tag == 0x34) physical_minimum = static_cast<int>(value);
+    if (tag == 0x44) physical_maximum = static_cast<int>(value);
     if (tag == 0x74) size = value;
     if (tag == 0x94) count = value;
     if (tag == 0x84) report = value;
@@ -66,12 +69,16 @@ void test_descriptor() {
       if (report == 2 && page == 1 && size == 16) { CHECK(count == 2 && minimum == -32768 && maximum == 32767 && value == 6); saw_xy = true; }
       if (report == 2 && page == 1 && usage == 0x38) { CHECK(size == 8 && minimum == -127 && maximum == 127 && value == 6); saw_wheel = true; }
       if (report == 2 && page == 0xC) { CHECK(usage == 0x238 && size == 8 && value == 6); saw_pan = true; }
-      if (report == 3 && page == 9 && value == 2) CHECK(size == 1 && count == 5);
-      if (report == 3 && page == 1 && value == 2) { CHECK(size == 16 && count == 2 && minimum == 0 && maximum == 65535); saw_absolute = true; }
+      if (report == 3 && value == 3) CHECK(size == 8 && count == 1);
+      if (report == 3 && page == 1 && value == 2) {
+        CHECK(size == 16 && count == 2 && minimum == 0 && maximum == 32767);
+        CHECK(physical_minimum == 0 && physical_maximum == 32767);
+        saw_absolute = true;
+      }
       if (report == 4 && value == 2) CHECK(page == 0x0c && size == 1 && count == 7);
     }
   }
-  CHECK(depth == 0 && top == 3);
+  CHECK(depth == 0 && top == 4);
   CHECK(bits[1] == 232 && bits[2] == 56 && bits[3] == 40 && bits[4] == 8);
   CHECK(saw_xy && saw_wheel && saw_pan && saw_absolute);
 }
@@ -114,8 +121,8 @@ void test_mouse_and_absolute() {
   auto press = drain(endpoint); CHECK(press.bytes[1] == 1 && signed16(press, 2) == 0);
   auto first = drain(endpoint); CHECK(first.id == 2 && first.length == 8 && first.bytes[1] == 1);
   CHECK(signed16(first, 2) == 17 && signed16(first, 4) == -33 && first.bytes[6] == 1 && first.bytes[7] == 254);
-  auto report = drain(endpoint); CHECK(report.id == 3 && report.length == 6 && report.bytes[1] == 1);
-  CHECK(report.bytes[2] == 255 && report.bytes[3] == 255 && report.bytes[4] == 0 && report.bytes[5] == 128);
+  auto report = drain(endpoint); CHECK(report.id == 3 && report.length == 6 && report.bytes[1] == 0);
+  CHECK(report.bytes[2] == 255 && report.bytes[3] == 127 && report.bytes[4] == 0 && report.bytes[5] == 64);
   auto second = drain(endpoint); CHECK(signed16(second, 2) == 3 && second.bytes[1] == 1);
   CHECK(drain(endpoint).bytes[1] == 0);
   CHECK(endpoint.submit(owner, motion(-32768, 32767)) == R::accepted);

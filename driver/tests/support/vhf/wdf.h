@@ -48,12 +48,14 @@ using EVT_WDF_FILE_CLEANUP = void(WDFFILEOBJECT);
 using EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL = void(WDFQUEUE, WDFREQUEST, size_t, size_t, ULONG);
 using EVT_WDF_TIMER = void(WDFTIMER);
 using EVT_WDF_REQUEST_IMPERSONATE = void(WDFREQUEST, PVOID);
-enum SECURITY_IMPERSONATION_LEVEL { SecurityAnonymous, SecurityIdentification };
+inline ULONG fake_requestor_process_id = 100;
+inline ULONG WdfRequestGetRequestorProcessId(WDFREQUEST) { return fake_requestor_process_id; }
+enum SECURITY_IMPERSONATION_LEVEL { SecurityAnonymous, SecurityIdentification, SecurityImpersonation };
 inline NTSTATUS fake_impersonation_status = STATUS_SUCCESS;
 inline NTSTATUS WdfRequestImpersonate(WDFREQUEST request, SECURITY_IMPERSONATION_LEVEL level,
   EVT_WDF_REQUEST_IMPERSONATE *callback, PVOID context) {
   if (fake_impersonation_status != STATUS_SUCCESS) return fake_impersonation_status;
-  if (level != SecurityIdentification) return STATUS_ACCESS_DENIED;
+  if (level != SecurityIdentification && level != SecurityImpersonation) return STATUS_ACCESS_DENIED;
   callback(request, context); return STATUS_SUCCESS;
 }
 inline thread_local std::vector<WDFWAITLOCK> fake_held_locks;

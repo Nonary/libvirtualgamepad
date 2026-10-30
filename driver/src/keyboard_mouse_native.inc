@@ -3,6 +3,12 @@
 // request, not merely creation or possession of a file object. A failure to
 // obtain the client token or verify its enabled Administrators/SYSTEM identity
 // denies the request. The framework restores the driver token on return.
+EVT_WDF_REQUEST_IMPERSONATE evt_keyboard_mouse_pin_opener;
+void evt_keyboard_mouse_pin_opener(WDFREQUEST, PVOID context) {
+  auto *const file = static_cast<keyboard_mouse_file_context *>(context);
+  file->opener_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, file->opener_process_id);
+}
+
 EVT_WDF_REQUEST_IMPERSONATE evt_keyboard_mouse_authorize;
 void evt_keyboard_mouse_authorize(WDFREQUEST, PVOID context) {
   auto *allowed = static_cast<bool *>(context);
@@ -23,6 +29,15 @@ void evt_keyboard_mouse_authorize(WDFREQUEST, PVOID context) {
 }
 
 [[nodiscard]] bool keyboard_mouse_authorized(WDFREQUEST request) noexcept {
+  // UMDF impersonation can retain the file opener's credentials after handle
+  // duplication. Require the actual requestor to be that same live process;
+  // possession of an administrator-opened handle does not confer its authority.
+  const auto owner = WdfRequestGetFileObject(request);
+  if (owner == nullptr) return false;
+  const auto *const file = get_keyboard_mouse_file_context(owner);
+  const auto requestor = WdfRequestGetRequestorProcessId(request);
+  if (file->opener_process == nullptr || requestor == 0 ||
+      requestor != file->opener_process_id) return false;
   bool allowed = false;
   const auto status = WdfRequestImpersonate(request, SecurityIdentification,
     evt_keyboard_mouse_authorize, &allowed);
