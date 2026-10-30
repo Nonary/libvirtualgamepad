@@ -39,6 +39,26 @@ target_include_directories(test_pid_descriptor PRIVATE ../src ../../include)
 add_test(NAME controller_descriptors COMMAND test_pid_descriptor)
 
 if(WIN32)
+    # Execute the producer's actual authorization callback against a real
+    # Windows identification-level token. This does not install a driver.
+    set(_km_native_source "${CMAKE_CURRENT_LIST_DIR}/../src/keyboard_mouse_native.inc")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_km_native_source}")
+    file(READ "${_km_native_source}" _km_native_text)
+    string(FIND "${_km_native_text}" "EVT_WDF_REQUEST_IMPERSONATE evt_keyboard_mouse_authorize;" _km_callback_begin)
+    string(FIND "${_km_native_text}" "[[nodiscard]] bool keyboard_mouse_authorized(" _km_callback_end)
+    if(_km_callback_begin LESS 0 OR _km_callback_end LESS_EQUAL _km_callback_begin)
+        message(FATAL_ERROR "Could not isolate the keyboard/mouse authorization callback")
+    endif()
+    math(EXPR _km_callback_length "${_km_callback_end} - ${_km_callback_begin}")
+    string(SUBSTRING "${_km_native_text}" ${_km_callback_begin} ${_km_callback_length} _km_callback)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/keyboard_mouse_authorization_callback.inc" "${_km_callback}")
+    add_executable(test_keyboard_mouse_authorization_windows test_keyboard_mouse_authorization_windows.cpp)
+    target_compile_features(test_keyboard_mouse_authorization_windows PRIVATE cxx_std_20)
+    target_include_directories(test_keyboard_mouse_authorization_windows PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(test_keyboard_mouse_authorization_windows PRIVATE advapi32)
+    add_test(NAME keyboard_mouse_windows_token_authorization COMMAND test_keyboard_mouse_authorization_windows)
+    set_tests_properties(keyboard_mouse_windows_token_authorization PROPERTIES TIMEOUT 10)
+
     # Manual, opt-in only: this probe suspends the machine. Never a CTest.
     add_executable(probe_sleep probe_sleep.cpp ../../client/client.cpp)
     target_compile_features(probe_sleep PRIVATE cxx_std_20)
