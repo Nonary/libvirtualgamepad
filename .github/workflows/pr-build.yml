@@ -41,6 +41,16 @@ jobs:
           persist-credentials: false
       - name: Test the capture script's inline Ctrl+C helper
         run: ./tools/tests/test-capture-helper.ps1
+      - name: Run Windows driver and input contract tests
+        run: |
+          $testBuild = Join-Path $env:RUNNER_TEMP 'vhf-contract-tests'
+          cmake -S driver/tests -B $testBuild -G 'Visual Studio 17 2022' -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Contract test configuration failed.' }
+          # Debug keeps assertions enabled in the contract tests.
+          cmake --build $testBuild --config Debug --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'Contract test build failed.' }
+          ctest --test-dir $testBuild -C Debug --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'Contract tests failed.' }
       - name: Build and verify the unsigned driver package with the WDK
         run: |
           $ErrorActionPreference = 'Stop'
