@@ -62,6 +62,37 @@ inline constexpr NTSTATUS STATUS_INVALID_HANDLE = -12;
 inline constexpr bool NT_SUCCESS(NTSTATUS status) { return status >= 0; }
 #define RTL_NUMBER_OF(x) (sizeof(x) / sizeof((x)[0]))
 
+// Security boundary used by the source-stage driver. These stand-ins model
+// authorization results; they do not establish Windows impersonation semantics.
+using PSID = void *;
+struct SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes; };
+struct TOKEN_USER { SID_AND_ATTRIBUTES User; };
+enum WELL_KNOWN_SID_TYPE { WinLocalSystemSid, WinBuiltinAdministratorsSid };
+enum TOKEN_INFORMATION_CLASS { TokenUser };
+inline constexpr DWORD TOKEN_QUERY = 8, SECURITY_MAX_SID_SIZE = 68;
+inline bool fake_token_open_failure = false, fake_token_query_failure = false;
+inline bool fake_sid_failure = false, fake_membership_failure = false;
+inline bool fake_client_is_system = false, fake_client_is_admin = true;
+inline HANDLE fake_token_handle() { return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(0x7777)); }
+inline HANDLE GetCurrentThread() { return nullptr; }
+inline BOOL OpenThreadToken(HANDLE, DWORD, BOOL, HANDLE *token) {
+  if (fake_token_open_failure) return FALSE;
+  *token = fake_token_handle(); return TRUE;
+}
+inline BOOL GetTokenInformation(HANDLE, TOKEN_INFORMATION_CLASS, void *data, DWORD, DWORD *bytes) {
+  if (fake_token_query_failure) return FALSE;
+  static_cast<TOKEN_USER *>(data)->User.Sid = fake_client_is_system ? reinterpret_cast<PSID>(1) : reinterpret_cast<PSID>(2);
+  *bytes = sizeof(TOKEN_USER); return TRUE;
+}
+inline BOOL IsWellKnownSid(PSID sid, WELL_KNOWN_SID_TYPE type) {
+  return type == WinLocalSystemSid && sid == reinterpret_cast<PSID>(1);
+}
+inline BOOL CreateWellKnownSid(WELL_KNOWN_SID_TYPE, PSID, void *, DWORD *) { return !fake_sid_failure; }
+inline BOOL CheckTokenMembership(HANDLE, PSID, BOOL *result) {
+  if (fake_membership_failure) return FALSE;
+  *result = fake_client_is_admin; return TRUE;
+}
+
 // User-mode timing and threading behind the Steam Controller keep-alive worker
 // (start_sc26_keepalive and friends in driver.cpp). The lifecycle fixture never
 // creates the worker's timer or stop event, so no worker runs here: handle

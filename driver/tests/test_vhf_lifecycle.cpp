@@ -291,7 +291,6 @@ void test_device_add_propagates_queue_creation_failure() {
 
 void test_disabled_keyboard_mouse() {
   static_assert(LVG_ENABLE_KEYBOARD_MOUSE_SOURCE == 0);
-  static_assert(LVG_KM_NATIVE_CONTRACT_ACKNOWLEDGED == 0);
   fixture f;
   fake_wdf_object queue; queue.parent = &f.device;
   for (DWORD function = 0x820; function <= 0x827; ++function) {

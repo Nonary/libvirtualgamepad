@@ -14,11 +14,23 @@ const std::uint8_t keyboard_mouse_descriptor[] {
   0x05,0x01, 0x09,0x30, 0x09,0x31, 0x16,0x00,0x80,
   0x26,0xFF,0x7F, 0x75,0x10, 0x95,0x02, 0x81,0x06,
   0x09,0x38, 0x15,0x81, 0x25,0x7F, 0x75,0x08, 0x95,0x01, 0x81,0x06,
-  0x05,0x0C, 0x0A,0x38,0x02, 0x81,0x06, 0xC0,0xC0,
-  0x05,0x01, 0x09,0x02, 0xA1,0x01, 0x85,km::k_absolute_report_id,
-  0x09,0x01, 0xA1,0x00, 0x09,0x30, 0x09,0x31,
+  0x05,0x0C, 0x0A,0x38,0x02, 0x81,0x06, 0xC0,
+  // Absolute and relative reports share one Mouse top-level collection, so
+  // both enter the same Windows mouse stack. Each carries the button state.
+  0x85,km::k_absolute_report_id,
+  0x05,0x01, 0x09,0x01, 0xA1,0x00,
+  0x05,0x09, 0x19,0x01, 0x29,0x05, 0x15,0x00, 0x25,0x01,
+  0x75,0x01, 0x95,0x05, 0x81,0x02,
+  0x75,0x03, 0x95,0x01, 0x81,0x03,
+  0x05,0x01, 0x09,0x30, 0x09,0x31,
   0x15,0x00, 0x27,0xFF,0xFF,0x00,0x00,
-  0x75,0x10, 0x95,0x02, 0x81,0x02, 0xC0,0xC0
+  0x75,0x10, 0x95,0x02, 0x81,0x02, 0xC0,0xC0,
+  // Consumer controls: one bit for each advertised mute/volume/playback key.
+  0x05,0x0C, 0x09,0x01, 0xA1,0x01, 0x85,km::k_consumer_report_id,
+  0x09,0xE2, 0x09,0xE9, 0x09,0xEA, 0x09,0xCD,
+  0x09,0xB5, 0x09,0xB6, 0x09,0xB7,
+  0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x07, 0x81,0x02,
+  0x75,0x01, 0x95,0x01, 0x81,0x03, 0xC0
 };
 const std::size_t keyboard_mouse_descriptor_size = sizeof(keyboard_mouse_descriptor);
 
@@ -52,6 +64,13 @@ endpoint::report endpoint::keyboard_report() const noexcept {
   value.id = value.bytes[0] = km::k_keyboard_report_id;
   value.length = 30;
   for (std::size_t i = 0; i < keys_.size(); ++i) value.bytes[i + 1] = keys_[i];
+  return value;
+}
+endpoint::report endpoint::consumer_report() const noexcept {
+  report value {};
+  value.id = value.bytes[0] = km::k_consumer_report_id;
+  value.bytes[1] = consumer_buttons_;
+  value.length = 2;
   return value;
 }
 endpoint::report endpoint::relative_report(std::int16_t x, std::int16_t y, std::int8_t wheel, std::int8_t pan) const noexcept {
@@ -90,6 +109,24 @@ endpoint::result endpoint::submit(owner_token owner, const km::button_request &r
   enqueue(relative_report());
   return result::accepted;
 }
+endpoint::result endpoint::submit(owner_token owner, const km::consumer_request &request) noexcept {
+  const auto admitted = admission(owner);
+  if (admitted != result::accepted) return admitted;
+  if (!km::valid(request) || request.reserved != 0 || request.pressed > 1) return result::invalid;
+  std::uint8_t bit = 0;
+  switch (request.usage) {
+    case 0x00e2: bit = 1u << 0; break; case 0x00e9: bit = 1u << 1; break;
+    case 0x00ea: bit = 1u << 2; break; case 0x00cd: bit = 1u << 3; break;
+    case 0x00b5: bit = 1u << 4; break; case 0x00b6: bit = 1u << 5; break;
+    case 0x00b7: bit = 1u << 6; break; default: return result::invalid;
+  }
+  if (((consumer_buttons_ & bit) != 0) == (request.pressed != 0)) return result::unchanged;
+  if (count_ == queue_capacity) return result::busy;
+  if (request.pressed) consumer_buttons_ |= bit;
+  else consumer_buttons_ &= static_cast<std::uint8_t>(~bit);
+  enqueue(consumer_report());
+  return result::accepted;
+}
 endpoint::result endpoint::submit(owner_token owner, const km::relative_request &request) noexcept {
   const auto admitted = admission(owner);
   if (admitted != result::accepted) return admitted;
@@ -108,9 +145,10 @@ endpoint::result endpoint::submit(owner_token owner, const km::absolute_request 
   if (count_ == queue_capacity) return result::busy;
   report value {};
   value.id = value.bytes[0] = km::k_absolute_report_id;
-  value.length = 5;
-  put16(&value.bytes[1], request.x);
-  put16(&value.bytes[3], request.y);
+  value.length = 6;
+  value.bytes[1] = buttons_;
+  put16(&value.bytes[2], request.x);
+  put16(&value.bytes[4], request.y);
   enqueue(value);
   return result::accepted;
 }
@@ -122,15 +160,17 @@ endpoint::result endpoint::close(owner_token owner) noexcept {
   head_ = count_ = 0;
   keys_ = {};
   buttons_ = 0;
+  consumer_buttons_ = 0;
   enqueue(keyboard_report());
   enqueue(relative_report());
+  enqueue(consumer_report());
   return result::accepted;
 }
 void endpoint::ready_for_report() noexcept {
   if (state_ != state::active && state_ != state::closing) return;
   credit_ = true;
   if (state_ == state::closing && count_ == 0) {
-    // Both neutral reports have been retired. Do not reuse the underlying HID
+    // All neutral reports have been retired. Do not reuse the underlying HID
     // child: the WDF owner must delete it and then reset this core explicitly.
     state_ = state::drained;
     credit_ = false;
@@ -157,6 +197,7 @@ void endpoint::reset_after_device_deleted() noexcept {
   absolute_generation_ = 0;
   keys_ = {};
   buttons_ = 0;
+  consumer_buttons_ = 0;
   head_ = count_ = 0;
   retained_ = {};
   credit_ = false;

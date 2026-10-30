@@ -9,8 +9,8 @@
 namespace lvg::driver {
 // Pure producer core. The caller serializes it under its state lock. It owns no
 // WDF objects; it must outlive every retained VHF report. This is intentionally
-// connected only by the default-OFF native source stage; native identity,
-// framework/build/runtime and release gates remain separate.
+// connected by the native UMDF transport; Windows runtime qualification and
+// release packaging remain separate from these portable contracts.
 class keyboard_mouse_endpoint {
  public:
   using owner_token = std::uintptr_t; // Internal identity; never sent over ABI.
@@ -25,6 +25,7 @@ class keyboard_mouse_endpoint {
 
   result open(owner_token owner, std::uint32_t verified_absolute_generation = 0) noexcept;
   result submit(owner_token owner, const km::keyboard_request &request) noexcept;
+  result submit(owner_token owner, const km::consumer_request &request) noexcept;
   result submit(owner_token owner, const km::button_request &request) noexcept;
   result submit(owner_token owner, const km::relative_request &request) noexcept;
   result submit(owner_token owner, const km::absolute_request &request) noexcept;
@@ -47,21 +48,22 @@ class keyboard_mouse_endpoint {
   result admission(owner_token owner) const noexcept;
   void enqueue(const report &value) noexcept;
   report keyboard_report() const noexcept;
+  report consumer_report() const noexcept;
   report relative_report(std::int16_t x = 0, std::int16_t y = 0, std::int8_t wheel = 0, std::int8_t pan = 0) const noexcept;
   owner_token owner_ {};
   state state_ {state::closed};
   std::uint32_t absolute_generation_ {};
   std::array<std::uint8_t, km::k_keyboard_bytes> keys_ {};
   std::uint8_t buttons_ {};
+  std::uint8_t consumer_buttons_ {};
   std::array<report, queue_capacity> queue_ {};
   std::size_t head_ {}, count_ {};
   report retained_ {};
   bool credit_ {};
 };
 
-// Three top-level collections: keyboard, relative mouse with buttons/wheels,
-// and an absolute pointer without buttons (so absolute motion cannot release a
-// relative mouse's held button). No console identity or VID/PID is borrowed.
+// Three top-level collections: keyboard, mouse (relative and absolute reports
+// each carry button state), and consumer controls. No other VID/PID is borrowed.
 extern const std::uint8_t keyboard_mouse_descriptor[];
 extern const std::size_t keyboard_mouse_descriptor_size;
 } // namespace lvg::driver

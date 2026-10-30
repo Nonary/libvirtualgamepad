@@ -135,7 +135,7 @@ struct fixture {
     return request.completion_status;
   }
   template<class T> NTSTATUS send(DWORD code,T &input,WDFFILEOBJECT file=nullptr) {
-    if(code>=lvg::km::ioctl_keyboard && code<=lvg::km::ioctl_absolute) {
+    if((code>=lvg::km::ioctl_keyboard && code<=lvg::km::ioctl_absolute) || code==lvg::km::ioctl_consumer) {
       lvg::km::submission_response reply{};ULONG_PTR information=0;
       const auto status=raw(code,&input,sizeof(input),sizeof(input),&reply,sizeof(reply),sizeof(reply),file,&information);
       if(!NT_SUCCESS(status))return status;
@@ -207,6 +207,32 @@ DWORD win_error(NTSTATUS status) {
     default:return ERROR_INVALID_FUNCTION;
   }
 }
+void test_keyboard_mouse_authorization() {
+  fixture f;
+  fake_client_is_admin = false; fake_client_is_system = false;
+  CHECK(f.open() == STATUS_ACCESS_DENIED); CHECK(creates == 0);
+  auto control = lvg::km::request<lvg::km::control_request>();
+  auto query = lvg::km::request<lvg::km::query_response>();
+  CHECK(f.raw(lvg::km::ioctl_query, &control, sizeof(control), sizeof(control),
+    &query, sizeof(query), sizeof(query)) == STATUS_ACCESS_DENIED);
+  fake_client_is_system = true; CHECK(f.open() == STATUS_SUCCESS);
+  fake_client_is_system = false;
+  fake_token_query_failure = true; CHECK(f.open() == STATUS_ACCESS_DENIED);
+  fake_token_query_failure = false;
+  auto key = lvg::km::request<lvg::km::keyboard_request>(); key.usage = 4; key.pressed = 1;
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  CHECK(f.abort() == STATUS_ACCESS_DENIED); CHECK(deletes == 0);
+  fake_client_is_admin = true; fake_impersonation_status = STATUS_ACCESS_DENIED;
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  fake_impersonation_status = STATUS_SUCCESS; fake_token_open_failure = true;
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  fake_token_open_failure = false; fake_sid_failure = true;
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  fake_sid_failure = false; fake_membership_failure = true;
+  CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_ACCESS_DENIED);
+  fake_membership_failure = false; CHECK(f.send(lvg::km::ioctl_keyboard, key) == STATUS_SUCCESS);
+  CHECK(f.abort() == STATUS_SUCCESS); CHECK(deletes == 1);
+}
 void test_raw_boundaries() {
   fixture f; auto control=lvg::km::request<lvg::km::control_request>();
   for(size_t bad:{size_t{0},sizeof(control)-1,sizeof(control)+1}) {
@@ -227,7 +253,7 @@ void test_raw_boundaries() {
   CHECK(f.raw(lvg::km::ioctl_query,shared.data(),sizeof(control),sizeof(control),shared.data(),shared.size(),shared.size(),nullptr,&information)==STATUS_SUCCESS);
   lvg::km::query_response query{};std::memcpy(&query,shared.data(),sizeof(query));
   CHECK(information==sizeof(query));CHECK(lvg::km::valid(query));
-  CHECK(query.capabilities==lvg::km::k_relative_capabilities);CHECK(query.absolute_target_generation==0);CHECK(query.reserved==0);CHECK(query.queue_capacity==64);
+  CHECK(query.capabilities==lvg::km::k_primary_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_primary_absolute_generation);CHECK(query.reserved==0);CHECK(query.queue_capacity==64);
   CHECK(f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),&query,sizeof(query)+1,sizeof(query))==STATUS_INVALID_BUFFER_SIZE);
   CHECK(f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),&query,sizeof(query),sizeof(query)+1)==STATUS_INVALID_BUFFER_SIZE);
   CHECK(f.open()==STATUS_SUCCESS);CHECK(f.open(&f.stranger)==STATUS_DEVICE_BUSY);
@@ -235,9 +261,13 @@ void test_raw_boundaries() {
   CHECK(f.send(lvg::km::ioctl_keyboard,key,&f.stranger)==STATUS_ACCESS_DENIED);
   key.reserved=1;CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_INVALID_PARAMETER);
   key.reserved=0;key.usage=3;CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_INVALID_PARAMETER);
-  auto absolute=lvg::km::request<lvg::km::absolute_request>();absolute.target_generation=1;
-  CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_NOT_SUPPORTED);
+  auto absolute=lvg::km::request<lvg::km::absolute_request>();absolute.target_generation=2;
+  CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_DEVICE_NOT_READY);
   CHECK(f.context.keyboard_mouse.core.pending()==0);CHECK(submits==0);
+  absolute.target_generation=lvg::km::k_primary_absolute_generation;
+  absolute.x=65535;absolute.y=32768;
+  CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_SUCCESS);
+  CHECK(f.context.keyboard_mouse.core.pending()==1);CHECK(submits==0);
   // Missing owner is rejected by the actual dispatch entry.
   fake_wdf_object request;request.input_buffer=&control;request.input_length=sizeof(control);
   evt_io_device_control(&f.queue,&request,0,sizeof(control),lvg::km::ioctl_open);
@@ -255,12 +285,15 @@ void test_fifo_and_drain() {
   CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_DEVICE_BUSY);
   ready(h);CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_SUCCESS);
   // Close purges queued input but not the retained report.
-  CHECK(f.close()==STATUS_DEVICE_BUSY);CHECK(f.context.keyboard_mouse.core.pending()==2);retained_unchanged(h);
+  CHECK(f.close()==STATUS_DEVICE_BUSY);CHECK(f.context.keyboard_mouse.core.pending()==3);retained_unchanged(h);
   CHECK(f.send(lvg::km::ioctl_relative,relative)==STATUS_DEVICE_NOT_READY);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_keyboard_report_id);
   for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
   CHECK(f.close()==STATUS_DEVICE_BUSY);CHECK(deletes==0);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_relative_report_id);
+  for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
+  CHECK(f.context.keyboard_mouse.core.pending()==1);
+  ready(h);CHECK(h->packet.reportId==lvg::km::k_consumer_report_id);
   for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
   CHECK(f.context.keyboard_mouse.core.pending()==0);
   CHECK(f.context.keyboard_mouse.core.lifecycle()==keyboard_mouse_endpoint::state::closing);
@@ -268,6 +301,36 @@ void test_fifo_and_drain() {
   ready(h);CHECK(f.context.keyboard_mouse.core.lifecycle()==keyboard_mouse_endpoint::state::drained);
   CHECK(f.close()==STATUS_SUCCESS);CHECK(deletes==1);CHECK(h->deleted);
   CHECK(f.context.keyboard_mouse.state==slot_state::empty);CHECK(f.open()==STATUS_SUCCESS);
+}
+void test_consumer_transport() {
+  fixture f; on_start=[](VHFHANDLE h){ready(h);};
+  CHECK(f.open()==STATUS_SUCCESS); auto *h=handles.back().get();
+  auto media=lvg::km::request<lvg::km::consumer_request>();
+  media.usage=0x00e9;media.pressed=1;
+  CHECK(f.send(lvg::km::ioctl_consumer,media)==STATUS_SUCCESS);
+  CHECK(h->packet.reportId==lvg::km::k_consumer_report_id);
+  CHECK(h->bytes.size()==2 && h->bytes[1]==2);
+  media.usage=0x00e2;CHECK(f.send(lvg::km::ioctl_consumer,media)==STATUS_SUCCESS);
+  ready(h);CHECK(h->bytes[1]==3);
+  media.usage=0x00e9;media.pressed=0;CHECK(f.send(lvg::km::ioctl_consumer,media)==STATUS_SUCCESS);
+  ready(h);CHECK(h->bytes[1]==1);
+  media.usage=0x8888;CHECK(f.send(lvg::km::ioctl_consumer,media)==STATUS_INVALID_PARAMETER);
+  CHECK(f.abort()==STATUS_SUCCESS);
+}
+void test_absolute_mouse_drag_transport() {
+  fixture f; on_start=[](VHFHANDLE h){ready(h);};
+  CHECK(f.open()==STATUS_SUCCESS); auto *h=handles.back().get();
+  auto button=lvg::km::request<lvg::km::button_request>();button.button=1;button.pressed=1;
+  CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+  CHECK(h->packet.reportId==lvg::km::k_relative_report_id && h->bytes[1]==1);
+  auto absolute=lvg::km::request<lvg::km::absolute_request>();
+  absolute.target_generation=lvg::km::k_primary_absolute_generation;absolute.x=0x1234;absolute.y=0x5678;
+  CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_SUCCESS);
+  button.pressed=0;CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+  ready(h);CHECK(h->packet.reportId==lvg::km::k_absolute_report_id);
+  CHECK(h->bytes.size()==6 && h->bytes[1]==1 && h->bytes[2]==0x34 && h->bytes[3]==0x12 && h->bytes[4]==0x78 && h->bytes[5]==0x56);
+  ready(h);CHECK(h->packet.reportId==lvg::km::k_relative_report_id && h->bytes[1]==0);
+  CHECK(f.abort()==STATUS_SUCCESS);
 }
 void test_failures_and_forced_delete() {
   for(int mode=0;mode<5;++mode) {
@@ -549,8 +612,8 @@ NTSTATUS query(fixture &f) {
   const auto status=f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),
     &response,sizeof(response),sizeof(response),nullptr,&information);
   if(NT_SUCCESS(status)) {
-    CHECK(information==sizeof(response));CHECK(response.capabilities==lvg::km::k_relative_capabilities);
-    CHECK(response.absolute_target_generation==0);
+    CHECK(information==sizeof(response));CHECK(response.capabilities==lvg::km::k_primary_capabilities);
+    CHECK(response.absolute_target_generation==lvg::km::k_primary_absolute_generation);
   }
   return status;
 }
@@ -797,7 +860,7 @@ void test_client_chain() {
   CHECK(client.connect()==ERROR_SUCCESS);CHECK(opens==1);CHECK(client.connected());
   const auto gamepad_features=client.available_features();CHECK((gamepad_features&lvg::feature_input_state)!=0);
   lvg::km::query_response query{};CHECK(client.query_keyboard_mouse(&query)==ERROR_SUCCESS);
-  CHECK(query.capabilities==lvg::km::k_relative_capabilities);CHECK(query.absolute_target_generation==0);
+  CHECK(query.capabilities==lvg::km::k_primary_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_primary_absolute_generation);
   for(int mode=0;mode<5;++mode) {
     on_reply=[&](DWORD code,void *raw,DWORD *bytes) {
       if(code!=lvg::km::ioctl_query)return;
@@ -805,8 +868,8 @@ void test_client_chain() {
       if(mode==0)--*bytes;
       if(mode==1)response->prefix.version++;
       if(mode==2)response->reserved=1;
-      if(mode==3)response->capabilities|=lvg::km::bound_absolute_mouse;
-      if(mode==4)response->absolute_target_generation=1;
+      if(mode==3)response->capabilities&=~lvg::km::bound_absolute_mouse;
+      if(mode==4)response->absolute_target_generation=0;
     };
     CHECK(client.query_keyboard_mouse(&query)==ERROR_INVALID_DATA);
     CHECK(query.capabilities==0);CHECK(query.absolute_target_generation==0);
@@ -815,13 +878,20 @@ void test_client_chain() {
   CHECK(client.available_features()==gamepad_features);
   on_start=[](VHFHANDLE h){ready(h);};CHECK(client.open_keyboard_mouse()==ERROR_SUCCESS);
   auto key=lvg::km::request<lvg::km::keyboard_request>();key.usage=4;key.pressed=1;
+  auto media=lvg::km::request<lvg::km::consumer_request>();media.usage=0xffff;media.pressed=1;
+  CHECK(client.submit_keyboard_mouse(media)==ERROR_INVALID_PARAMETER);
+  media.usage=0x00e9;CHECK(client.submit_keyboard_mouse(media)==ERROR_SUCCESS);
+  auto *media_handle=handles.back().get();
+  CHECK(media_handle->packet.reportId==lvg::km::k_consumer_report_id && media_handle->bytes[1]==2);
+  ready(media_handle);media.pressed=0;CHECK(client.submit_keyboard_mouse(media)==ERROR_SUCCESS);
+  CHECK(media_handle->bytes[1]==0);ready(media_handle);
   const int before=ioctls;key.reserved=1;CHECK(client.submit_keyboard_mouse(key)==ERROR_INVALID_PARAMETER);CHECK(ioctls==before);key.reserved=0;
   CHECK(client.submit_keyboard_mouse(key)==ERROR_SUCCESS);
   auto relative=lvg::km::request<lvg::km::relative_request>();relative.x=1;
   for(size_t i=0;i<keyboard_mouse_endpoint::queue_capacity;++i)CHECK(client.submit_keyboard_mouse(relative)==ERROR_SUCCESS);
   CHECK(client.submit_keyboard_mouse(relative)==ERROR_BUSY); // Validated producer busy acknowledgement.
   auto *h=handles.back().get();CHECK(client.close_keyboard_mouse()==ERROR_BUSY);
-  ready(h);ready(h);CHECK(client.close_keyboard_mouse()==ERROR_BUSY);ready(h);
+  ready(h);ready(h);CHECK(client.close_keyboard_mouse()==ERROR_BUSY);ready(h);ready(h);
   CHECK(client.close_keyboard_mouse()==ERROR_SUCCESS);
   CHECK(client.open_keyboard_mouse()==ERROR_SUCCESS);
   submit_result=STATUS_DEVICE_BUSY;CHECK(client.submit_keyboard_mouse(key)==ERROR_NOT_READY);
@@ -945,12 +1015,13 @@ BOOL SetupDiGetDeviceInterfaceDetailW(HDEVINFO,SP_DEVICE_INTERFACE_DATA *,SP_DEV
   out->DevicePath[0]=L'x';return TRUE;
 }
 BOOL SetupDiDestroyDeviceInfoList(HDEVINFO){return TRUE;}
-HANDLE CreateFileW(const wchar_t *,DWORD access,DWORD sharing,void *,DWORD disposition,DWORD,HANDLE) {
+HANDLE CreateFileW(const wchar_t *,DWORD access,DWORD sharing,void *,DWORD disposition,DWORD flags,HANDLE) {
   CHECK(current!=nullptr);CHECK(access==(GENERIC_READ|GENERIC_WRITE));CHECK(sharing==0);CHECK(disposition==OPEN_EXISTING);
+  CHECK(flags == (FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_CONTEXT_TRACKING));
   ++opens;fake_wdf_object request;evt_file_create(&current->device,&request,&current->owner);
   return &current->owner;
 }
-BOOL CloseHandle(HANDLE handle){++closes;evt_file_close(static_cast<WDFFILEOBJECT>(handle));return TRUE;}
+BOOL CloseHandle(HANDLE handle){if(handle==fake_token_handle())return TRUE;++closes;evt_file_close(static_cast<WDFFILEOBJECT>(handle));return TRUE;}
 BOOL DeviceIoControl(HANDLE handle,DWORD code,void *input,DWORD input_size,void *output,DWORD output_size,DWORD *bytes,void *) {
   ++ioctls;ULONG_PTR information=0;
   const auto status=current->raw(code,input,input_size,input_size,output,output_size,output_size,static_cast<WDFFILEOBJECT>(handle),&information);
@@ -959,4 +1030,4 @@ BOOL DeviceIoControl(HANDLE handle,DWORD code,void *input,DWORD input_size,void 
   if(forced_reply_error!=ERROR_SUCCESS){last_error=forced_reply_error;return FALSE;}
   return NT_SUCCESS(status)?TRUE:FALSE;
 }
-int main(int argc,char **argv){if(argc==2 && std::strcmp(argv[1],"--retirement-only")==0){test_power_retirement_minimal();}else if(argc==2 && std::strcmp(argv[1],"--power-only")==0){test_power_contracts();}else{test_power_contracts();test_raw_boundaries();test_fifo_and_drain();test_failures_and_forced_delete();test_cleanup_during_start();test_submit_rundown_and_late_delete_callback();test_rundown_wait_failure_fallback_drains();test_mixed_keyboard_mouse_and_controller_teardown_order();test_submission_reply_validation();test_client_chain();}std::printf("KM actual driver/client transport: %d checks, %d failures\n",checks.load(),failures.load());return failures==0?0:1;}
+int main(int argc,char **argv){if(argc==2 && std::strcmp(argv[1],"--retirement-only")==0){test_power_retirement_minimal();}else if(argc==2 && std::strcmp(argv[1],"--power-only")==0){test_power_contracts();}else{test_keyboard_mouse_authorization();test_power_contracts();test_raw_boundaries();test_fifo_and_drain();test_consumer_transport();test_absolute_mouse_drag_transport();test_failures_and_forced_delete();test_cleanup_during_start();test_submit_rundown_and_late_delete_callback();test_rundown_wait_failure_fallback_drains();test_mixed_keyboard_mouse_and_controller_teardown_order();test_submission_reply_validation();test_client_chain();}std::printf("KM actual driver/client transport: %d checks, %d failures\n",checks.load(),failures.load());return failures==0?0:1;}

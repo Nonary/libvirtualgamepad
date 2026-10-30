@@ -1,10 +1,8 @@
-# Optional keyboard/mouse UMDF2 source prerequisite
+# Keyboard/mouse UMDF2 source transport
 
-This is an **incomplete, default-OFF source prerequisite** for
-[Nonary/Vibepollo#602](https://github.com/Nonary/Vibepollo/issues/602), stacked on
-[libvirtualgamepad PR8](https://github.com/Nonary/libvirtualgamepad/pull/8).
-It is not a complete issue fix, usable host backend, Windows-qualified driver,
-accepted device identity, signed artifact, deployed feature, or nightly inclusion.
+This transport creates a VHF keyboard/mouse child for the host. A new driver
+package and consumer update are required before an existing installation has
+these capabilities. Portable tests do not establish native Windows behavior.
 
 ## Provenance and dependency
 
@@ -33,35 +31,22 @@ replay accepted or uncertain HID input, or interpret gamepad recovery as KM
 neutral delivery. Source migration to Vibepollo is a separate step. PR7's touch
 fix is independent, except for additive test CMake reconciliation.
 
-## Off by default and still fail-closed
+## Build and capabilities
 
-`LVG_ENABLE_KEYBOARD_MOUSE_SOURCE` defaults to 0. The project properties
-`LvgEnableKeyboardMouseSource` and
-`LvgKeyboardMouseNativeContractAcknowledged` both default to false. The driver
-DLL excludes the new core unless explicitly enabled. Existing gamepad protocol 2
-and its feature negotiation are not replaced. Additive client methods are never
-called by `connect()` or implicitly by controller operations.
-
-An experimental source build requires both properties set to true and separately
-reviewed, nonzero 16-bit `LvgKeyboardMouseVendorId`/`LvgKeyboardMouseProductId`
-values. No default identity is supplied. Numeric checks and an acknowledgement
-are build guards, not evidence of ownership or native qualification. Tests use
-synthetic sentinel IDs only in in-process shims. Do not publish those identities.
-No INF, packaging, signing, release, consumer pin, UI, or SendInput route changes.
-
-Query advertises only keyboard, relative mouse, and wheel detents, with absolute
-target generation 0. Absolute submissions remain unsupported: normalized
-coordinates are not a verified native coordinate-domain binding. The recovered
-host selector requires all capabilities, a matching nonzero absolute generation,
-and explicit release/native qualification. Those gates must not be weakened to
-make this source stage appear usable.
+The UMDF project defaults `LvgEnableKeyboardMouseSource` to true. Vendor and
+product IDs default to zero, optional values supported by VHF; a project-owned
+identity can override them. Gamepad protocol 2 is unchanged. The query reports
+keyboard, relative mouse, wheel detents, consumer keys, and an absolute pointer
+bound to the primary display. `primary_absolute_mouse` distinguishes that
+domain from a virtual desktop. Generation 1 represents this primary-display
+domain; the host must account for changes in display geometry.
 
 ## Separate control ABI
 
 `keyboard_mouse_control.h` allocates METHOD_BUFFERED IOCTL functions
-`0x820` through `0x827` with read/write access: query, open, close, keyboard,
-button, relative, absolute, abort. KM ABI version 1 is separate from controller
-protocol 2. The default/released path refuses the new controls.
+`0x820` through `0x828` with read/write access: query, open, close, keyboard,
+button, relative, absolute, abort and consumer keys. KM ABI version 1 is
+separate from controller protocol 2. Older driver packages may refuse them.
 
 Both callback buffer lengths and retrieved raw-buffer lengths must match exactly.
 Input is copied into a fixed local value before output writes, including aliased
@@ -76,6 +61,21 @@ busy becomes `ERROR_NOT_READY`, since delivery is uncertain. Malformed/truncated
 replies and native submit failures are also uncertain. They never authorize
 SendInput replay. Close busy means neutral drain is pending, not submission
 backpressure.
+
+## Input authorization
+
+The source stage checks the caller for every keyboard/mouse IOCTL through
+`WdfRequestImpersonate` at identification level. An enabled Administrators
+SID or LocalSystem identity is required; failures to retrieve or check the
+token fail closed. This does not change authorization for gamepad IOCTLs. The
+private client requests identification-level dynamic security context and the
+INF declares the same maximum level.
+
+The portable fixture executes the dispatcher with allowed, denied and failed
+impersonation/token-check results. It models the WDF boundary: real UMDF
+security-context and duplicated-handle behavior, default process tokens,
+secure desktops and WDK compilation still require Windows-native testing.
+The check does not claim to limit input to a particular desktop or session.
 
 ## Ownership, D0, and recovery
 
@@ -139,12 +139,12 @@ one submission per callback and retains the transfer buffer until the next
 on VhfUm quiescing ready-callback entry by synchronous delete return, including
 already-dispatched entries not yet counted by this source. The general reference
 pages describe VhfKm and do not establish that exact VhfUm guarantee. The fixture
-models it, not proves it. The native acknowledgement remains false by default.
+models it, not proves it.
 An OS call/submit that never returns can hold synchronous rundown open; this
 source does not claim a driver-enforced timeout or a native watchdog fix.
 
-Normal close purges queued input, appends neutral keyboard/buttons, and preserves
-the in-flight report until readiness. Only after the second neutral is retired
+Normal close purges queued input, appends neutral keyboard/buttons/consumer
+reports, and preserves the in-flight report until readiness. After the last neutral is retired
 does a subsequent close delete and succeed. Abort force-removes KM without
 closing the shared client or controller children. Abort success proves removal,
 not neutral delivery; a failed abort leaves client-side removal unproven.
@@ -153,7 +153,7 @@ not neutral delivery; a failed abort leaves client-side removal unproven.
 
 The project is an UMDF2.15 DynamicLibrary using WindowsUserModeDriver10.0,
 SDK/WDK 26100 and VhfUm.lib. It remains an upper filter above inbox Vhf.sys.
-PR8's non-power-managed default queue is preserved. Under KM opt-in the file
+PR8's non-power-managed default queue is preserved. With KM enabled the file
 configuration sets AutoForwardCleanupClose false because private creates are
 completed here. Null internal-target creates and private owner controls still
 need real UMDF validation; portable tests are not OS behavior evidence.
@@ -167,10 +167,8 @@ cleanup during power loss, stale callbacks, delayed PnP removal, and explicit
 re-entry without replay. Stale-context tests use separate live fixture storage,
 not use-after-free invocations forbidden by the modeled native contract.
 
-See [the validation record](keyboard-mouse-validation.md) for executed checks and
-negative controls. Remaining prerequisites are independent review, real SDK/WDK
-builds, native callback/UMDF contract qualification, accepted project identity,
-absolute-domain binding, verifier/power/disconnect/process-death tests, Windows
-held-input cleanup, typematic/layout/Raw Input/multi-client coverage, signed
-producer release and qualified consumer integration. No Windows runtime, WDK,
-VM or hardware qualification was available for this source adaptation.
+See [the validation record](keyboard-mouse-validation.md) for earlier checks and
+negative controls. A real Windows run must still verify callback lifetime,
+primary-display mapping, power transitions, process-death cleanup, typematic,
+layouts, Raw Input and multi-client behavior. The source change does not by
+itself publish a signed producer release or update a consumer's pinned package.

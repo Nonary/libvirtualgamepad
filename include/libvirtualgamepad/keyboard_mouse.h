@@ -5,15 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 
-// Source-only keyboard/mouse extension. This ABI is not advertised or handled by
-// the released v2 control driver. A new signed producer must implement the
-// transport and negotiate these capabilities before a consumer may use it.
+// Keyboard/mouse extension, independently negotiated from the gamepad protocol.
 namespace lvg::km {
 inline constexpr std::uint16_t k_abi_version = 1;
 inline constexpr std::size_t k_keyboard_bytes = 29; // Keyboard page usages 0..0xE7.
 inline constexpr std::uint8_t k_keyboard_report_id = 1;
 inline constexpr std::uint8_t k_relative_report_id = 2;
 inline constexpr std::uint8_t k_absolute_report_id = 3;
+inline constexpr std::uint8_t k_consumer_report_id = 4;
 enum capability : std::uint32_t {
   keyboard = 1u << 0,
   relative_mouse = 1u << 1,
@@ -21,6 +20,10 @@ enum capability : std::uint32_t {
   // Requires a native-verified binding to exactly one absolute coordinate
   // domain. It does not imply MOUSE_VIRTUAL_DESKTOP or display calibration.
   bound_absolute_mouse = 1u << 3,
+  // The absolute pointer is mapped to the Windows primary display, not the
+  // virtual desktop. Hosts must transform from their desktop coordinate space.
+  primary_absolute_mouse = 1u << 4,
+  consumer = 1u << 5,
 };
 inline constexpr std::uint32_t k_required_capabilities = keyboard | relative_mouse | wheel_detents | bound_absolute_mouse;
 
@@ -40,6 +43,13 @@ struct query_response {
 struct keyboard_request {
   header prefix;
   std::uint16_t usage; // USB HID page 0x07; never a Win32 VK or UTF character.
+  std::uint8_t pressed;
+  std::uint8_t reserved;
+};
+// USB HID Consumer page usages for volume and playback keys.
+struct consumer_request {
+  header prefix;
+  std::uint16_t usage;
   std::uint8_t pressed;
   std::uint8_t reserved;
 };
@@ -67,6 +77,7 @@ struct absolute_request {
 static_assert(sizeof(header) == 8);
 static_assert(sizeof(query_response) == 24);
 static_assert(sizeof(keyboard_request) == 12);
+static_assert(sizeof(consumer_request) == 12);
 static_assert(sizeof(button_request) == 12);
 static_assert(sizeof(relative_request) == 16);
 static_assert(sizeof(absolute_request) == 16);

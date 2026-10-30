@@ -104,7 +104,7 @@ DWORD client::connect() noexcept {
       0,
       nullptr,
       OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL,
+      FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_CONTEXT_TRACKING,
       nullptr);
     LocalFree(detail);
     if (handle_ == INVALID_HANDLE_VALUE) {
@@ -260,9 +260,11 @@ DWORD client::query_keyboard_mouse(km::query_response *const response) noexcept 
     &received, sizeof(received), &bytes);
   if (status != ERROR_SUCCESS) return status;
   if (bytes != sizeof(received) || !km::valid(received) || received.reserved != 0 ||
-      (received.capabilities & ~km::k_required_capabilities) != 0 ||
+      (received.capabilities & ~(km::k_required_capabilities | km::primary_absolute_mouse | km::consumer)) != 0 ||
       (received.capabilities & km::k_relative_capabilities) != km::k_relative_capabilities ||
       received.queue_capacity < 2 ||
+      ((received.capabilities & km::primary_absolute_mouse) != 0 &&
+       (received.capabilities & km::bound_absolute_mouse) == 0) ||
       (((received.capabilities & km::bound_absolute_mouse) != 0) !=
        (received.absolute_target_generation != 0))) {
     return ERROR_INVALID_DATA;
@@ -294,6 +296,16 @@ DWORD client::submit_keyboard_mouse(const km::button_request &input) noexcept {
       input.button < 1 || input.button > 5) return ERROR_INVALID_PARAMETER;
   auto request = input;
   return issue_keyboard_mouse_submission(km::ioctl_button, &request, sizeof(request));
+}
+DWORD client::submit_keyboard_mouse(const km::consumer_request &input) noexcept {
+  if (!km::valid(input) || input.reserved != 0 || input.pressed > 1) return ERROR_INVALID_PARAMETER;
+  switch (input.usage) {
+    case 0x00e2: case 0x00e9: case 0x00ea: case 0x00cd:
+    case 0x00b5: case 0x00b6: case 0x00b7: break;
+    default: return ERROR_INVALID_PARAMETER;
+  }
+  auto request = input;
+  return issue_keyboard_mouse_submission(km::ioctl_consumer, &request, sizeof(request));
 }
 DWORD client::submit_keyboard_mouse(const km::relative_request &input) noexcept {
   if (!km::valid(input) || input.reserved != 0 || input.wheel == -128 ||

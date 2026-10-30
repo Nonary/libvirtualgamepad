@@ -1,3 +1,34 @@
+// The control device is also used by gamepads and permits interactive users.
+// HID keyboard/mouse injection needs a stronger boundary: authorize every
+// request, not merely creation or possession of a file object. A failure to
+// obtain the client token or verify its enabled Administrators/SYSTEM identity
+// denies the request. The framework restores the driver token on return.
+EVT_WDF_REQUEST_IMPERSONATE evt_keyboard_mouse_authorize;
+void evt_keyboard_mouse_authorize(WDFREQUEST, PVOID context) {
+  auto *allowed = static_cast<bool *>(context);
+  HANDLE token = nullptr;
+  if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) return;
+  alignas(void *) unsigned char user_buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE] {};
+  DWORD bytes = 0;
+  const bool is_system = GetTokenInformation(token, TokenUser, user_buffer,
+    static_cast<DWORD>(sizeof(user_buffer)), &bytes) &&
+    IsWellKnownSid(reinterpret_cast<TOKEN_USER *>(user_buffer)->User.Sid, WinLocalSystemSid);
+  unsigned char admin_sid[SECURITY_MAX_SID_SIZE] {};
+  DWORD sid_size = static_cast<DWORD>(sizeof(admin_sid));
+  BOOL is_admin = FALSE;
+  const bool admin_checked = CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
+    admin_sid, &sid_size) && CheckTokenMembership(token, admin_sid, &is_admin);
+  CloseHandle(token);
+  *allowed = is_system || (admin_checked && is_admin);
+}
+
+[[nodiscard]] bool keyboard_mouse_authorized(WDFREQUEST request) noexcept {
+  bool allowed = false;
+  const auto status = WdfRequestImpersonate(request, SecurityIdentification,
+    evt_keyboard_mouse_authorize, &allowed);
+  return NT_SUCCESS(status) && allowed;
+}
+
 // Copyright (c) 2026 Chase Payne
 // SPDX-License-Identifier: MIT
 // Included once by driver.cpp inside its private namespace, after the actual
@@ -340,10 +371,10 @@ void delete_stopped_keyboard_mouse(
   slot.vhf = nullptr;
   slot.owner = owner;
   slot.state = slot_state::starting;
-  // There is no accepted native absolute-domain binding. Never infer one from
-  // normalized coordinates, a controller identity or a client-provided token.
+  // Standard absolute mouse HID coordinates address the primary display.
+  // Advertise that domain explicitly so the host can transform its geometry.
   const NTSTATUS admitted = keyboard_mouse_status(
-    slot.core.open(reinterpret_cast<keyboard_mouse_endpoint::owner_token>(owner), 0));
+    slot.core.open(reinterpret_cast<keyboard_mouse_endpoint::owner_token>(owner), lvg::km::k_primary_absolute_generation));
   unlock_context(context);
   unlock_keyboard_mouse_rundown(slot);
   if (!NT_SUCCESS(admitted)) {
@@ -590,6 +621,18 @@ template<class request_t>
   WDFREQUEST request, const std::size_t output_length, const std::size_t input_length,
   const ULONG code, NTSTATUS *const status, ULONG_PTR *const information) noexcept {
   using namespace lvg::km;
+  // Unrecognized controls remain available to the gamepad dispatcher.
+  switch (code) {
+    case ioctl_query: case ioctl_open: case ioctl_close: case ioctl_abort:
+    case ioctl_keyboard: case ioctl_button: case ioctl_relative: case ioctl_absolute: case ioctl_consumer:
+      if (!keyboard_mouse_authorized(request)) {
+        *status = STATUS_ACCESS_DENIED;
+        *information = 0;
+        return true;
+      }
+      break;
+    default: return false;
+  }
   switch (code) {
     case ioctl_query: {
       control_request input {};
@@ -606,9 +649,9 @@ template<class request_t>
       unlock_context(context);
       if (!available) { *status = STATUS_DEVICE_NOT_READY; break; }
       auto response = lvg::km::request<query_response>();
-      response.capabilities = k_relative_capabilities;
+      response.capabilities = k_primary_capabilities;
       response.queue_capacity = static_cast<std::uint32_t>(keyboard_mouse_endpoint::queue_capacity);
-      response.absolute_target_generation = 0;
+      response.absolute_target_generation = k_primary_absolute_generation;
       std::memcpy(raw, &response, sizeof(response));
       *information = sizeof(response);
       break;
@@ -632,6 +675,7 @@ template<class request_t>
       break; \
     }
     LVG_KM_SUBMIT_CASE(ioctl_keyboard, keyboard_request)
+    LVG_KM_SUBMIT_CASE(ioctl_consumer, consumer_request)
     LVG_KM_SUBMIT_CASE(ioctl_button, button_request)
     LVG_KM_SUBMIT_CASE(ioctl_relative, relative_request)
     LVG_KM_SUBMIT_CASE(ioctl_absolute, absolute_request)

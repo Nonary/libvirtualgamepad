@@ -73,8 +73,9 @@
     <OutDir>$(ProjectDir)..\build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)..\build\obj\$(Platform)\$(Configuration)\</IntDir>
     <EnableTestSign>false</EnableTestSign>
-    <LvgEnableKeyboardMouseSource Condition="'$(LvgEnableKeyboardMouseSource)' == ''">false</LvgEnableKeyboardMouseSource>
-    <LvgKeyboardMouseNativeContractAcknowledged Condition="'$(LvgKeyboardMouseNativeContractAcknowledged)' == ''">false</LvgKeyboardMouseNativeContractAcknowledged>
+    <LvgEnableKeyboardMouseSource Condition="'$(LvgEnableKeyboardMouseSource)' == ''">true</LvgEnableKeyboardMouseSource>
+    <LvgKeyboardMouseVendorId Condition="'$(LvgKeyboardMouseVendorId)' == ''">0</LvgKeyboardMouseVendorId>
+    <LvgKeyboardMouseProductId Condition="'$(LvgKeyboardMouseProductId)' == ''">0</LvgKeyboardMouseProductId>
     <ExternalIncludePath>$(WDKContentRoot)Include\wdf\umdf\$(UMDF_VERSION_MAJOR).$(UMDF_VERSION_MINOR);$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
 
@@ -90,20 +91,16 @@
       <AdditionalOptions>/permissive- /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>VhfUm.lib;cfgmgr32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>VhfUm.lib;cfgmgr32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(TargetPlatformVersion)\um\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
   <ItemDefinitionGroup Condition="'$(LvgEnableKeyboardMouseSource)' == 'true'">
     <ClCompile>
-      <PreprocessorDefinitions>LVG_ENABLE_KEYBOARD_MOUSE_SOURCE=1;LVG_KM_NATIVE_CONTRACT_ACKNOWLEDGED=1;LVG_KM_VENDOR_ID=$(LvgKeyboardMouseVendorId);LVG_KM_PRODUCT_ID=$(LvgKeyboardMouseProductId);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>LVG_ENABLE_KEYBOARD_MOUSE_SOURCE=1;LVG_KM_VENDOR_ID=$(LvgKeyboardMouseVendorId);LVG_KM_PRODUCT_ID=$(LvgKeyboardMouseProductId);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <Target Name="ValidateKeyboardMouseSourceStage" BeforeTargets="ClCompile" Condition="'$(LvgEnableKeyboardMouseSource)' == 'true'">
-    <Error Condition="'$(LvgKeyboardMouseNativeContractAcknowledged)' != 'true'" Text="Explicitly review/acknowledge the real UMDF2/VhfUm SDK and native contracts before enabling this source stage." />
-    <Error Condition="'$(LvgKeyboardMouseVendorId)' == '' or '$(LvgKeyboardMouseProductId)' == ''" Text="Supply separately reviewed project-owned keyboard/mouse VID/PID; no default identity is provided." />
-  </Target>
 
   <ItemGroup>
     <ClCompile Include="src\keyboard_mouse.cpp" Condition="'$(LvgEnableKeyboardMouseSource)' == 'true'" />

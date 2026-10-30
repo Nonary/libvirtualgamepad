@@ -142,6 +142,7 @@ class client final {
   // ERROR_BUSY rejects before mutation. Any other transport failure after
   // acceptance is uncertain; never replay through SendInput before teardown.
   [[nodiscard]] DWORD submit_keyboard_mouse(const km::keyboard_request &input) noexcept;
+  [[nodiscard]] DWORD submit_keyboard_mouse(const km::consumer_request &input) noexcept;
   [[nodiscard]] DWORD submit_keyboard_mouse(const km::button_request &input) noexcept;
   [[nodiscard]] DWORD submit_keyboard_mouse(const km::relative_request &input) noexcept;
   [[nodiscard]] DWORD submit_keyboard_mouse(const km::absolute_request &input) noexcept;

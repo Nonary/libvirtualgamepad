@@ -35,7 +35,7 @@ std::int16_t signed16(const E::report &report, std::size_t offset) {
 void test_descriptor() {
   // Parse the real descriptor's short items; check bit lengths, absolute vs
   // relative semantics and signed ranges, rather than searching source text.
-  std::array<unsigned, 4> bits {};
+  std::array<unsigned, 5> bits {};
   unsigned report = 0, size = 0, count = 0, page = 0, usage = 0, depth = 0, top = 0;
   int minimum = 0, maximum = 0;
   bool saw_xy = false, saw_wheel = false, saw_pan = false, saw_absolute = false;
@@ -66,11 +66,13 @@ void test_descriptor() {
       if (report == 2 && page == 1 && size == 16) { CHECK(count == 2 && minimum == -32768 && maximum == 32767 && value == 6); saw_xy = true; }
       if (report == 2 && page == 1 && usage == 0x38) { CHECK(size == 8 && minimum == -127 && maximum == 127 && value == 6); saw_wheel = true; }
       if (report == 2 && page == 0xC) { CHECK(usage == 0x238 && size == 8 && value == 6); saw_pan = true; }
-      if (report == 3) { CHECK(page == 1 && size == 16 && count == 2 && minimum == 0 && maximum == 65535 && value == 2); saw_absolute = true; }
+      if (report == 3 && page == 9 && value == 2) CHECK(size == 1 && count == 5);
+      if (report == 3 && page == 1 && value == 2) { CHECK(size == 16 && count == 2 && minimum == 0 && maximum == 65535); saw_absolute = true; }
+      if (report == 4 && value == 2) CHECK(page == 0x0c && size == 1 && count == 7);
     }
   }
   CHECK(depth == 0 && top == 3);
-  CHECK(bits[1] == 232 && bits[2] == 56 && bits[3] == 32);
+  CHECK(bits[1] == 232 && bits[2] == 56 && bits[3] == 40 && bits[4] == 8);
   CHECK(saw_xy && saw_wheel && saw_pan && saw_absolute);
 }
 void test_keyboard_order_and_retained_storage() {
@@ -103,21 +105,21 @@ void test_mouse_and_absolute() {
   E endpoint; CHECK(endpoint.open(owner, 11) == R::accepted);
   CHECK(endpoint.submit(owner, button(1)) == R::accepted);
   CHECK(endpoint.submit(owner, motion(17, -33, 1, -2)) == R::accepted);
+  auto absolute = km::request<km::absolute_request>(); absolute.x = 65535; absolute.y = 32768; absolute.target_generation = 10;
+  CHECK(endpoint.submit(owner, absolute) == R::not_ready);
+  absolute.target_generation = 11;
+  CHECK(endpoint.submit(owner, absolute) == R::accepted);
   CHECK(endpoint.submit(owner, motion(3)) == R::accepted);
   CHECK(endpoint.submit(owner, button(1, false)) == R::accepted);
   auto press = drain(endpoint); CHECK(press.bytes[1] == 1 && signed16(press, 2) == 0);
   auto first = drain(endpoint); CHECK(first.id == 2 && first.length == 8 && first.bytes[1] == 1);
   CHECK(signed16(first, 2) == 17 && signed16(first, 4) == -33 && first.bytes[6] == 1 && first.bytes[7] == 254);
+  auto report = drain(endpoint); CHECK(report.id == 3 && report.length == 6 && report.bytes[1] == 1);
+  CHECK(report.bytes[2] == 255 && report.bytes[3] == 255 && report.bytes[4] == 0 && report.bytes[5] == 128);
   auto second = drain(endpoint); CHECK(signed16(second, 2) == 3 && second.bytes[1] == 1);
   CHECK(drain(endpoint).bytes[1] == 0);
   CHECK(endpoint.submit(owner, motion(-32768, 32767)) == R::accepted);
   auto limits = drain(endpoint); CHECK(signed16(limits, 2) == -32768 && signed16(limits, 4) == 32767);
-  auto absolute = km::request<km::absolute_request>(); absolute.x = 65535; absolute.y = 32768; absolute.target_generation = 10;
-  CHECK(endpoint.submit(owner, absolute) == R::not_ready);
-  absolute.target_generation = 11;
-  CHECK(endpoint.submit(owner, absolute) == R::accepted);
-  auto report = drain(endpoint); CHECK(report.id == 3 && report.length == 5);
-  CHECK(report.bytes[1] == 255 && report.bytes[2] == 255 && report.bytes[3] == 0 && report.bytes[4] == 128);
   E unbound; CHECK(unbound.open(owner) == R::accepted);
   CHECK(unbound.submit(owner, absolute) == R::unsupported);
 }
@@ -141,6 +143,22 @@ void test_backpressure_is_atomic() {
   }
   CHECK(movements == E::queue_capacity);
 }
+void test_consumer_input() {
+  E endpoint; CHECK(endpoint.open(owner) == R::accepted);
+  auto media = km::request<km::consumer_request>(); media.usage = 0x00e9; media.pressed = 1;
+  CHECK(endpoint.submit(owner, media) == R::accepted);
+  CHECK(endpoint.submit(owner, media) == R::unchanged);
+  auto up = drain(endpoint); CHECK(up.id == 4 && up.length == 2 && up.bytes[1] == 2);
+  media.usage = 0x00e2; CHECK(endpoint.submit(owner, media) == R::accepted);
+  auto both = drain(endpoint); CHECK(both.bytes[1] == 3);
+  media.usage = 0x00e9; media.pressed = 0; CHECK(endpoint.submit(owner, media) == R::accepted);
+  CHECK(drain(endpoint).bytes[1] == 1);
+  media.usage = 0xffff; CHECK(endpoint.submit(owner, media) == R::invalid);
+  CHECK(endpoint.close(owner) == R::accepted);
+  CHECK(drain(endpoint).id == 1); CHECK(drain(endpoint).id == 2);
+  auto neutral = drain(endpoint); CHECK(neutral.id == 4 && neutral.bytes[1] == 0);
+  endpoint.ready_for_report(); CHECK(endpoint.lifecycle() == E::state::drained);
+}
 void test_cleanup_and_fault() {
   E endpoint; CHECK(endpoint.open(owner) == R::accepted);
   CHECK(endpoint.submit(owner, key(4)) == R::accepted);
@@ -151,13 +169,15 @@ void test_cleanup_and_fault() {
   CHECK(endpoint.close(owner) == R::accepted);
   CHECK(endpoint.close(owner) == R::unchanged);
   CHECK(std::memcmp(retained, &copy, sizeof(copy)) == 0);
-  CHECK(endpoint.pending() == 2);
+  CHECK(endpoint.pending() == 3);
   CHECK(endpoint.submit(owner, key(5)) == R::not_ready);
   const auto neutral_key = drain(endpoint);
   CHECK(neutral_key.id == 1);
   for (std::size_t i = 1; i < neutral_key.length; ++i) CHECK(neutral_key.bytes[i] == 0);
   const auto neutral_mouse = drain(endpoint);
   CHECK(neutral_mouse.id == 2 && neutral_mouse.bytes[1] == 0);
+  const auto neutral_consumer = drain(endpoint);
+  CHECK(neutral_consumer.id == 4 && neutral_consumer.bytes[1] == 0);
   CHECK(endpoint.lifecycle() == E::state::closing);
   endpoint.ready_for_report();
   CHECK(endpoint.lifecycle() == E::state::drained);
@@ -190,7 +210,7 @@ void test_request_validation() {
 }
 }
 int main() {
-  test_descriptor(); test_keyboard_order_and_retained_storage(); test_mouse_and_absolute();
+  test_descriptor(); test_keyboard_order_and_retained_storage(); test_mouse_and_absolute(); test_consumer_input();
   test_backpressure_is_atomic(); test_cleanup_and_fault(); test_request_validation();
   std::printf("Keyboard/mouse producer core: %d checks, %d failures\n", checks, failures);
   return failures ? EXIT_FAILURE : EXIT_SUCCESS;
