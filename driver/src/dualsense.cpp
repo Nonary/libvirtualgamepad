@@ -346,6 +346,13 @@ bool apply_ds5_output(
       (output.valid_flag2 & k_ds5_flag2_compatible_vibration)) {
     feedback->low_frequency = static_cast<std::uint16_t>(output.motor_left << 8);
     feedback->high_frequency = static_cast<std::uint16_t>(output.motor_right << 8);
+  } else if (output.valid_flag0 == 0 && output.valid_flag1 == 0 && output.valid_flag2 == 0 &&
+             output.motor_left == 0 && output.motor_right == 0) {
+    // SDL stops rumble with a report that sets no validity bits and zeroes
+    // both motors. Keeping the previous amplitudes would re-post the old
+    // rumble, which hosts can't tell from SDL's periodic resend.
+    feedback->low_frequency = 0;
+    feedback->high_frequency = 0;
   }
 
   if (output.valid_flag1 & k_ds5_flag1_lightbar) {
