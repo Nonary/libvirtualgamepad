@@ -14,6 +14,9 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
 
+    [uint16] $KeyboardMouseVendorId = 0,
+    [uint16] $KeyboardMouseProductId = 0,
+
     [string] $InfVerifPath,
     [string] $Inf2CatPath,
     [string] $CatalogGenerationEvidencePath,
@@ -33,6 +36,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($KeyboardMouseVendorId -eq 0 -or $KeyboardMouseProductId -eq 0) {
+    throw 'The ordered mouse mapper requires explicit nonzero product-owned -KeyboardMouseVendorId and -KeyboardMouseProductId. No production identity is allocated by this script.'
+}
+
 
 function Resolve-SdkTool {
     param(
@@ -158,6 +165,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $template = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.inf.in'
 $dll = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepad.dll"
 $deviceSetup = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepadDeviceSetup.exe"
+$mapperTemplate = Join-Path $repoRoot 'driver/mouse_mapper/VibeshineVhfMouseMapper.inf.in'
+$mapperSys = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfMouseMapper.sys"
+foreach ($required in @($mapperTemplate, $mapperSys)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required mapper input is missing: $required" }
+}
 $arch = if ($Platform -eq 'x64') { 'amd64' } else { 'arm64' }
 $inf2CatTarget = if ($Platform -eq 'x64') { '10_X64' } else { '10_ARM64' }
 
@@ -183,6 +195,8 @@ if (Test-Path -LiteralPath $OutputDir) {
 
 $driverDir = Join-Path $OutputDir 'driver'
 $toolsDir = Join-Path $OutputDir 'tools'
+$mapperDir = Join-Path $OutputDir 'mouse_mapper'
+New-Item -ItemType Directory -Path $mapperDir -Force | Out-Null
 New-Item -ItemType Directory -Path $driverDir -Force | Out-Null
 New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
 
@@ -195,6 +209,15 @@ $contents = $contents.Replace('$ARCH$', $arch).Replace('08/16/2026,0.1.0.0', $Dr
 Copy-Item -LiteralPath $dll -Destination $stagedDll
 Copy-Item -LiteralPath $deviceSetup -Destination $stagedDeviceSetup
 
+$mapperInf = Join-Path $mapperDir 'VibeshineVhfMouseMapper.inf'
+$stagedMapperSys = Join-Path $mapperDir 'VibeshineVhfMouseMapper.sys'
+$mapperContents = Get-Content -LiteralPath $mapperTemplate -Raw
+$mapperContents = $mapperContents.Replace('$ARCH$', $arch).Replace('08/16/2026,0.1.0.0', $DriverVer).Replace('$DRIVER_VER$', $DriverVer)
+$mapperContents = $mapperContents.Replace('$VID$', ('{0:X4}' -f $KeyboardMouseVendorId)).Replace('$PID$', ('{0:X4}' -f $KeyboardMouseProductId))
+if ($mapperContents -match '\$[A-Z_]+\$') { throw 'Unexpanded mapper INF template token.' }
+[System.IO.File]::WriteAllText($mapperInf, $mapperContents, [System.Text.Encoding]::Unicode)
+Copy-Item -LiteralPath $mapperSys -Destination $stagedMapperSys
+
 $inf2Cat = Resolve-SdkTool -Name 'Inf2Cat.exe' -ExplicitPath $Inf2CatPath
 
 if ($SkipInfVerif) {
@@ -205,9 +228,9 @@ if ($SkipInfVerif) {
         (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Windows Kits\10\Tools')
     )
     $infVerif = Resolve-SdkTool -Name 'InfVerif.exe' -ExplicitPath $InfVerifPath -AdditionalSearchRoots $wdkToolRoots
-    & $infVerif '/w' '/v' $inf
-    if ($LASTEXITCODE -ne 0) {
-        throw "InfVerif failed with exit code $LASTEXITCODE."
+    foreach ($stagedInf in @($inf, $mapperInf)) {
+        & $infVerif '/w' '/v' $stagedInf
+        if ($LASTEXITCODE -ne 0) { throw "InfVerif failed for '$stagedInf' with exit code $LASTEXITCODE." }
     }
 }
 
@@ -215,6 +238,10 @@ if ($SkipInfVerif) {
 if ($LASTEXITCODE -ne 0) {
     throw "Inf2Cat failed with exit code $LASTEXITCODE."
 }
+
+& $inf2Cat "/driver:$mapperDir" "/os:$inf2CatTarget"
+if ($LASTEXITCODE -ne 0) { throw "Mapper Inf2Cat failed with exit code $LASTEXITCODE." }
+$mapperCatalog = & (Join-Path $PSScriptRoot 'normalize-driver-catalog.ps1') -DriverDir $mapperDir -CatalogName 'VibeshineVhfMouseMapper.cat'
 
 $catalog = & (Join-Path $PSScriptRoot 'normalize-driver-catalog.ps1') -DriverDir $driverDir
 if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
@@ -240,6 +267,9 @@ if (-not [string]::IsNullOrWhiteSpace($CatalogGenerationEvidencePath)) {
         platform = $Platform
         driver_ver = $DriverVer
         files = [ordered]@{
+            'mouse_mapper/VibeshineVhfMouseMapper.inf' = (Get-FileHash -LiteralPath $mapperInf -Algorithm SHA256).Hash.ToLowerInvariant()
+            'mouse_mapper/VibeshineVhfMouseMapper.sys' = (Get-FileHash -LiteralPath $stagedMapperSys -Algorithm SHA256).Hash.ToLowerInvariant()
+            'mouse_mapper/VibeshineVhfMouseMapper.cat' = (Get-FileHash -LiteralPath $mapperCatalog -Algorithm SHA256).Hash.ToLowerInvariant()
             'driver/VibeshineVhfGamepad.inf' = (Get-FileHash -LiteralPath $inf -Algorithm SHA256).Hash.ToLowerInvariant()
             'driver/VibeshineVhfGamepad.dll' = (Get-FileHash -LiteralPath $stagedDll -Algorithm SHA256).Hash.ToLowerInvariant()
             'driver/VibeshineVhfGamepad.cat' = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -295,6 +325,14 @@ function Assert-LocalSigner {
     }
 }
 
+Sign-LocalFile -FilePath $stagedMapperSys
+Remove-Item -LiteralPath $mapperCatalog -Force
+& $inf2Cat "/driver:$mapperDir" "/os:$inf2CatTarget"
+if ($LASTEXITCODE -ne 0) { throw 'Mapper catalog regeneration after embedded test signing failed.' }
+$mapperCatalog = & (Join-Path $PSScriptRoot 'normalize-driver-catalog.ps1') -DriverDir $mapperDir -CatalogName 'VibeshineVhfMouseMapper.cat'
+Sign-LocalFile -FilePath $mapperCatalog
+Assert-LocalSigner -FilePath $mapperCatalog
+Assert-LocalSigner -FilePath $stagedMapperSys
 Sign-LocalFile -FilePath $catalog
 # The setup tool is deliberately outside the driver catalog, so embedding its
 # local signature after Inf2Cat does not change catalog membership.

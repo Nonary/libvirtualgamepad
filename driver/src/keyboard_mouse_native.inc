@@ -50,6 +50,7 @@ void evt_keyboard_mouse_authorize(WDFREQUEST, PVOID context) {
 // device/locks/local-target definitions. No replacement WDF/VHF implementation.
 using keyboard_mouse_endpoint = lvg::driver::keyboard_mouse_endpoint;
 EVT_VHF_READY_FOR_NEXT_READ_REPORT evt_keyboard_mouse_ready;
+EVT_VHF_ASYNC_OPERATION evt_keyboard_mouse_write_report;
 
 #if defined(LVG_KM_TEST_HOOKS)
 // The portable actual-body fixture pauses after rundown reservation and before
@@ -279,6 +280,84 @@ void evt_keyboard_mouse_ready(PVOID client_context) {
   ReleaseSRWLockExclusive(&callback->entry_lock);
 }
 
+// The mapper exclusively owns this vendor HID collection. Its ACK opens the
+// producer mouse gate only after the whole report entered the one Mouclass
+// stream. Callback lifetime is pinned independently of producer report bytes.
+void evt_keyboard_mouse_write_report(PVOID client_context,
+  VHFOPERATIONHANDLE operation, PVOID, PHID_XFER_PACKET transfer) {
+  auto *const callback = static_cast<keyboard_mouse_callback_context *>(client_context);
+  if (callback == nullptr) {
+    if (operation != nullptr) std::ignore = VhfAsyncOperationComplete(operation, STATUS_DEVICE_NOT_READY);
+    return;
+  }
+  InterlockedIncrement(&callback->active_entries);
+  NTSTATUS status = STATUS_DEVICE_NOT_READY;
+  bool reserved = false;
+  std::uint32_t reserved_sequence = 0;
+  device_context *context = nullptr;
+  if (InterlockedCompareExchange(&callback->retired, 0, 0) == 0) {
+    context = callback->parent;
+    if (context != nullptr && callback->slot == &context->keyboard_mouse && operation != nullptr) {
+      lvg::mouse_transport::ack_report ack {};
+      const bool framed = transfer != nullptr && transfer->reportBuffer != nullptr &&
+        transfer->reportId == lvg::mouse_transport::k_ack_report_id &&
+        transfer->reportBufferLen == sizeof(ack);
+      if (framed) std::memcpy(&ack, transfer->reportBuffer, sizeof(ack));
+      auto &slot = context->keyboard_mouse;
+      lock_keyboard_mouse_rundown(slot);
+      if (InterlockedCompareExchange(&callback->retired, 0, 0) == 0) {
+        lock_context(context);
+        if (!slot.rundown_stopping && !context->stopping && context->powered && slot.owner != nullptr &&
+            slot.callback_context == callback && slot.generation == callback->generation &&
+            slot.vhf != nullptr &&
+            (slot.state == slot_state::starting || slot.state == slot_state::active) &&
+            !get_keyboard_mouse_file_context(slot.owner)->cleanup_started) {
+          status = STATUS_INVALID_PARAMETER;
+          if (framed && lvg::mouse_transport::valid(ack) && slot.core.reserve_mouse_ack(ack.sequence)) {
+            reserved = true;
+            reserved_sequence = ack.sequence;
+            status = STATUS_SUCCESS;
+          }
+        }
+        unlock_context(context);
+      }
+      unlock_keyboard_mouse_rundown(slot);
+    }
+  }
+  // Completion may synchronously reenter readiness or the mapper's read path.
+  // Keep the ACK provisional and the mouse gate closed until it succeeds. No
+  // state/rundown lock spans VHF. The entry reference pins callback/context.
+  const NTSTATUS completed = operation != nullptr ? VhfAsyncOperationComplete(operation, status) : STATUS_INVALID_PARAMETER;
+  bool committed = false;
+  if (reserved && context != nullptr) {
+    auto &slot = context->keyboard_mouse;
+    lock_keyboard_mouse_rundown(slot);
+    if (InterlockedCompareExchange(&callback->retired, 0, 0) == 0) {
+      lock_context(context);
+      if (slot.callback_context == callback && slot.generation == callback->generation) {
+        if (!NT_SUCCESS(completed)) {
+          // A completion that reentered readiness still could not send the next
+          // mouse: reservation kept the gate closed. Uncertain failure faults
+          // without committing the ACK or replaying anything.
+          slot.core.submission_failed();
+        } else if (!slot.rundown_stopping && !context->stopping && context->powered &&
+                   slot.owner != nullptr && slot.vhf != nullptr &&
+                   (slot.state == slot_state::starting || slot.state == slot_state::active) &&
+                   !get_keyboard_mouse_file_context(slot.owner)->cleanup_started) {
+          committed = slot.core.commit_mouse_ack(reserved_sequence);
+        }
+      }
+      unlock_context(context);
+    }
+    unlock_keyboard_mouse_rundown(slot);
+  }
+  if (committed) std::ignore = pump_keyboard_mouse(context, callback);
+  AcquireSRWLockExclusive(&callback->entry_lock);
+  InterlockedDecrement(&callback->active_entries);
+  WakeAllConditionVariable(&callback->entry_drained);
+  ReleaseSRWLockExclusive(&callback->entry_lock);
+}
+
 // lifetime_gate held by every caller. Waits release the rundown lock, and the
 // fallback poll also leaves it released so an owner can always finish.
 void delete_stopped_keyboard_mouse(
@@ -386,10 +465,10 @@ void delete_stopped_keyboard_mouse(
   slot.vhf = nullptr;
   slot.owner = owner;
   slot.state = slot_state::starting;
-  // Standard absolute mouse HID coordinates address the primary display.
-  // Advertise that domain explicitly so the host can transform its geometry.
+  // The owned mapper uses one ordered mouse stream with normalized virtual
+  // desktop absolute coordinates, independent of current display geometry.
   const NTSTATUS admitted = keyboard_mouse_status(
-    slot.core.open(reinterpret_cast<keyboard_mouse_endpoint::owner_token>(owner), lvg::km::k_primary_absolute_generation));
+    slot.core.open(reinterpret_cast<keyboard_mouse_endpoint::owner_token>(owner), lvg::km::k_virtual_desktop_absolute_generation));
   unlock_context(context);
   unlock_keyboard_mouse_rundown(slot);
   if (!NT_SUCCESS(admitted)) {
@@ -433,6 +512,7 @@ void delete_stopped_keyboard_mouse(
     const_cast<PUCHAR>(lvg::driver::keyboard_mouse_descriptor));
   config.VhfClientContext = callback;
   config.EvtVhfReadyForNextReadReport = evt_keyboard_mouse_ready;
+  config.EvtVhfAsyncOperationWriteReport = evt_keyboard_mouse_write_report;
   config.EvtVhfCleanup = evt_vhf_cleanup;
   // Stable instance/container separation from all controller slots. GUIDs do
   // not assign a USB VID/PID or establish project ownership of supplied IDs.
@@ -444,7 +524,7 @@ void delete_stopped_keyboard_mouse(
   config.InstanceIDLength = static_cast<USHORT>(sizeof(instance));
   config.VendorID = static_cast<USHORT>(LVG_KM_VENDOR_ID);
   config.ProductID = static_cast<USHORT>(LVG_KM_PRODUCT_ID);
-  config.VersionNumber = 1;
+  config.VersionNumber = lvg::mouse_transport::k_hardware_revision;
 
   VHFHANDLE handle = nullptr;
   status = VhfCreate(&config, &handle);
@@ -474,6 +554,12 @@ void delete_stopped_keyboard_mouse(
   // All callback, generation, and packet storage is published before Start;
   // callbacks are allowed before VhfStart returns and can submit reentrantly.
   status = VhfStart(handle);
+  // Keyboard readiness alone cannot establish that our vendor mouse TLC has
+  // a functioning mapper. Finish opening only after that exact child is bound,
+  // connected to Mouclass, in D0, and reading its HID stream.
+  if (NT_SUCCESS(status) && !wait_for_ordered_mouse_mapper(slot.container_id, 2000)) {
+    status = STATUS_DEVICE_NOT_READY;
+  }
   lock_keyboard_mouse_rundown(slot);
   lock_context(context);
   const bool adopted = NT_SUCCESS(status) && !context->stopping && context->powered &&
@@ -664,9 +750,9 @@ template<class request_t>
       unlock_context(context);
       if (!available) { *status = STATUS_DEVICE_NOT_READY; break; }
       auto response = lvg::km::request<query_response>();
-      response.capabilities = k_primary_capabilities;
+      response.capabilities = k_ordered_capabilities;
       response.queue_capacity = static_cast<std::uint32_t>(keyboard_mouse_endpoint::queue_capacity);
-      response.absolute_target_generation = k_primary_absolute_generation;
+      response.absolute_target_generation = k_virtual_desktop_absolute_generation;
       std::memcpy(raw, &response, sizeof(response));
       *information = sizeof(response);
       break;

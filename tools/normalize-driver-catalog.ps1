@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $DriverDir
+    [string] $DriverDir,
+    [ValidateSet('VibeshineVhfGamepad.cat', 'VibeshineVhfMouseMapper.cat')]
+    [string] $CatalogName = 'VibeshineVhfGamepad.cat'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$canonicalName = 'VibeshineVhfGamepad.cat'
+$canonicalName = $CatalogName
 $DriverDir = [System.IO.Path]::GetFullPath($DriverDir)
 if (-not (Test-Path -LiteralPath $DriverDir -PathType Container)) {
     throw "The driver package directory does not exist: $DriverDir"

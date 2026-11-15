@@ -24,6 +24,11 @@ namespace {
 std::atomic<int> checks {}, failures {};
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x); } } while(false)
 NTSTATUS create_result=STATUS_SUCCESS,start_result=STATUS_SUCCESS,submit_result=STATUS_SUCCESS;
+bool mapper_ready=true;
+bool auto_mouse_ack=true;
+NTSTATUS complete_result=STATUS_SUCCESS;
+std::function<void()> on_complete;
+unsigned mapper_waits=0;
 std::function<void(VHFHANDLE)> on_create,on_start,on_delete,on_submit;
 std::function<void(VHFHANDLE)> on_before_submit;
 std::atomic<bool> fail_rundown_wait {};
@@ -46,6 +51,7 @@ struct fake_vhf {
   VHF_CONFIG config;
   fake_vhf_kind kind {fake_vhf_kind::keyboard_mouse};
   bool deleted{},deleting{},credit{};
+  std::uint32_t pending_mouse_ack{};
   PHID_XFER_PACKET retained{};
   HID_XFER_PACKET packet{};
   std::vector<UCHAR> bytes;
@@ -77,10 +83,21 @@ void retained_unchanged(VHFHANDLE h) {
   CHECK(h->retained->reportId==h->packet.reportId);
   CHECK(std::memcmp(h->packet.reportBuffer,h->bytes.data(),h->bytes.size())==0);
 }
+NTSTATUS acknowledge(VHFHANDLE h, std::uint32_t sequence) {
+  lvg::mouse_transport::ack_report ack {5,1,0,sequence};
+  HID_XFER_PACKET transfer {reinterpret_cast<PUCHAR>(&ack),sizeof(ack),5};
+  fake_operation operation;
+  if (h->pending_mouse_ack==sequence)h->pending_mouse_ack=0;
+  h->config.EvtVhfAsyncOperationWriteReport(h->config.VhfClientContext,&operation,nullptr,&transfer);
+  CHECK(operation.completions==1);
+  return operation.status;
+}
 void ready(VHFHANDLE h) {
+  if(auto_mouse_ack && h->pending_mouse_ack)CHECK(acknowledge(h,h->pending_mouse_ack)==STATUS_SUCCESS);
   retained_unchanged(h); h->retained=nullptr; h->credit=true;
   h->config.EvtVhfReadyForNextReadReport(h->config.VhfClientContext);
 }
+
 void boundary(VHFHANDLE h) {
   CHECK(!fake_holds(context_of(h).state_lock));CHECK(fake_rundown_depth==0);
 }
@@ -93,6 +110,7 @@ struct fixture {
   fake_wdf_object lifetime,state,target,device,timer,owner,stranger,queue;
   fixture() {
     create_result=start_result=submit_result=fake_open_status=STATUS_SUCCESS;
+    mapper_ready=true;mapper_waits=0;auto_mouse_ack=true;complete_result=STATUS_SUCCESS;on_complete={};
     forced_reply_error=0;on_reply={};
     on_create=on_start=on_delete=on_submit=on_before_submit={}; on_controller_delete={};
     fake_close_hook={}; fake_missing_file=false;
@@ -199,6 +217,12 @@ LONG InterlockedDecrement(volatile LONG *destination) {
   return std::atomic_ref<LONG>(*const_cast<LONG *>(destination)).fetch_sub(1)-1;
 }
 namespace {
+bool wait_for_ordered_mouse_mapper(const GUID &container, DWORD timeout_ms) noexcept {
+  ++mapper_waits;
+  CHECK(timeout_ms==2000);
+  CHECK(container.Data1==0x5d43cc5c && container.Data2==0x318a && container.Data3==0x46f4);
+  return mapper_ready;
+}
 void keyboard_mouse_test_before_submit(VHFHANDLE handle) {
   if(on_before_submit)on_before_submit(handle);
 }
@@ -296,7 +320,7 @@ void test_raw_boundaries() {
   CHECK(f.raw(lvg::km::ioctl_query,shared.data(),sizeof(control),sizeof(control),shared.data(),shared.size(),shared.size(),nullptr,&information)==STATUS_SUCCESS);
   lvg::km::query_response query{};std::memcpy(&query,shared.data(),sizeof(query));
   CHECK(information==sizeof(query));CHECK(lvg::km::valid(query));
-  CHECK(query.capabilities==lvg::km::k_primary_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_primary_absolute_generation);CHECK(query.reserved==0);CHECK(query.queue_capacity==64);
+  CHECK(query.capabilities==lvg::km::k_ordered_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_virtual_desktop_absolute_generation);CHECK(query.reserved==0);CHECK(query.queue_capacity==64);
   CHECK(f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),&query,sizeof(query)+1,sizeof(query))==STATUS_INVALID_BUFFER_SIZE);
   CHECK(f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),&query,sizeof(query),sizeof(query)+1)==STATUS_INVALID_BUFFER_SIZE);
   CHECK(f.open()==STATUS_SUCCESS);CHECK(f.open(&f.stranger)==STATUS_DEVICE_BUSY);
@@ -304,10 +328,10 @@ void test_raw_boundaries() {
   CHECK(f.send(lvg::km::ioctl_keyboard,key,&f.stranger)==STATUS_ACCESS_DENIED);
   key.reserved=1;CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_INVALID_PARAMETER);
   key.reserved=0;key.usage=3;CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_INVALID_PARAMETER);
-  auto absolute=lvg::km::request<lvg::km::absolute_request>();absolute.target_generation=2;
+  auto absolute=lvg::km::request<lvg::km::absolute_request>();absolute.target_generation=1;
   CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_DEVICE_NOT_READY);
   CHECK(f.context.keyboard_mouse.core.pending()==0);CHECK(submits==0);
-  absolute.target_generation=lvg::km::k_primary_absolute_generation;
+  absolute.target_generation=lvg::km::k_virtual_desktop_absolute_generation;
   absolute.x=65535;absolute.y=32768;
   CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_SUCCESS);
   CHECK(f.context.keyboard_mouse.core.pending()==1);CHECK(submits==0);
@@ -334,7 +358,10 @@ void test_fifo_and_drain() {
   for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
   CHECK(f.close()==STATUS_DEVICE_BUSY);CHECK(deletes==0);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_relative_report_id);
-  for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
+  CHECK(h->bytes.size()==sizeof(lvg::mouse_transport::report));
+  CHECK(h->bytes[1]==lvg::mouse_transport::k_version && h->bytes[4]==0);
+  CHECK(h->bytes[2]==lvg::mouse_transport::k_purge);
+  for(size_t i=3;i<18;++i)CHECK(h->bytes[i]==0);
   CHECK(f.context.keyboard_mouse.core.pending()==1);
   ready(h);CHECK(h->packet.reportId==lvg::km::k_consumer_report_id);
   for(size_t i=1;i<h->bytes.size();++i)CHECK(h->bytes[i]==0);
@@ -365,26 +392,175 @@ void test_absolute_mouse_drag_transport() {
   CHECK(f.open()==STATUS_SUCCESS); auto *h=handles.back().get();
   auto button=lvg::km::request<lvg::km::button_request>();button.button=1;button.pressed=1;
   CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
-  CHECK(h->packet.reportId==lvg::km::k_relative_report_id && h->bytes[1]==1);
+  CHECK(h->packet.reportId==lvg::mouse_transport::k_report_id && h->bytes[4]==1);
   auto absolute=lvg::km::request<lvg::km::absolute_request>();
-  absolute.target_generation=lvg::km::k_primary_absolute_generation;absolute.x=0x1234;absolute.y=0x5678;
+  absolute.target_generation=lvg::km::k_virtual_desktop_absolute_generation;absolute.x=0x1234;absolute.y=0x5678;
   CHECK(f.send(lvg::km::ioctl_absolute,absolute)==STATUS_SUCCESS);
   button.pressed=0;CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
-  ready(h);CHECK(h->packet.reportId==lvg::km::k_absolute_report_id);
-  CHECK(h->bytes.size()==6 && h->bytes[1]==0 && h->bytes[2]==0x1a && h->bytes[3]==0x09 && h->bytes[4]==0x3c && h->bytes[5]==0x2b);
-  ready(h);CHECK(h->packet.reportId==lvg::km::k_relative_report_id && h->bytes[1]==0);
+  ready(h);CHECK(h->packet.reportId==lvg::mouse_transport::k_report_id);
+  CHECK(h->bytes.size()==22 && h->bytes[1]==1 && h->bytes[2]==3 && h->bytes[3]==0 && h->bytes[4]==1);
+  CHECK(h->bytes[10]==0x34 && h->bytes[11]==0x12 && h->bytes[14]==0x78 && h->bytes[15]==0x56);
+  ready(h);CHECK(h->packet.reportId==lvg::mouse_transport::k_report_id && h->bytes[4]==0);
   CHECK(f.abort()==STATUS_SUCCESS);
 }
+void test_mouse_ack_gate_and_validation() {
+  fixture f; auto_mouse_ack=false; on_start=[](VHFHANDLE h){ready(h);};
+  CHECK(f.open()==STATUS_SUCCESS); auto *h=handles.back().get();
+  CHECK(h->config.EvtVhfAsyncOperationWriteReport!=nullptr);
+  auto button=lvg::km::request<lvg::km::button_request>();button.button=1;button.pressed=1;
+  auto key=lvg::km::request<lvg::km::keyboard_request>();key.usage=4;key.pressed=1;
+  auto motion=lvg::km::request<lvg::km::relative_request>();motion.x=11;
+  CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+  CHECK(f.send(lvg::km::ioctl_keyboard,key)==STATUS_SUCCESS);
+  CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+  ready(h);CHECK(h->packet.reportId==1); // Retained bytes no longer contain mouse sequence.
+  ready(h);CHECK(submits==2 && slot_of(h).core.awaiting_mouse_ack()==1);
+  CHECK(acknowledge(h,0)==STATUS_INVALID_PARAMETER);
+  CHECK(acknowledge(h,2)==STATUS_INVALID_PARAMETER);
+  for(int mode=0;mode<7;++mode) {
+    lvg::mouse_transport::ack_report ack{5,1,0,1};
+    HID_XFER_PACKET transfer{reinterpret_cast<PUCHAR>(&ack),sizeof(ack),5};
+    if(mode==0)ack.version=2;
+    if(mode==1)ack.reserved=1;
+    if(mode==2)ack.report_id=2;
+    if(mode==3)transfer.reportId=2;
+    if(mode==4)--transfer.reportBufferLen;
+    if(mode==5)++transfer.reportBufferLen;
+    if(mode==6)transfer.reportBuffer=nullptr;
+    fake_operation operation;
+    evt_keyboard_mouse_write_report(h->config.VhfClientContext,&operation,nullptr,&transfer);
+    CHECK(operation.completions==1 && operation.status==STATUS_INVALID_PARAMETER);
+    CHECK(slot_of(h).core.awaiting_mouse_ack()==1 && submits==2);
+  }
+  CHECK(acknowledge(h,1)==STATUS_SUCCESS); // Pumps queued mouse using existing VHF credit.
+  CHECK(submits==3 && slot_of(h).core.awaiting_mouse_ack()==2);
+  CHECK(acknowledge(h,1)==STATUS_INVALID_PARAMETER); // Duplicate cannot unlock next report.
+  CHECK(f.close()==STATUS_DEVICE_BUSY);
+  ready(h);CHECK(h->packet.reportId==1);
+  ready(h);CHECK(slot_of(h).core.awaiting_mouse_ack()==2 && h->packet.reportId==1);
+  CHECK(acknowledge(h,2)==STATUS_SUCCESS);
+  CHECK(h->packet.reportId==2 && h->pending_mouse_ack==3 && h->bytes[4]==0 &&
+        h->bytes[2]==lvg::mouse_transport::k_purge);
+  ready(h);CHECK(h->packet.reportId==4);
+  ready(h);CHECK(slot_of(h).core.lifecycle()==keyboard_mouse_endpoint::state::closing);
+  CHECK(acknowledge(h,3)==STATUS_SUCCESS);
+  CHECK(slot_of(h).core.lifecycle()==keyboard_mouse_endpoint::state::drained);
+  const auto old_generation=slot_of(h).generation;
+  CHECK(f.close()==STATUS_SUCCESS);
+  CHECK(f.open()==STATUS_SUCCESS);h=handles.back().get();
+  CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+  keyboard_mouse_callback_context stale{};
+  stale.parent=&f.context;stale.slot=&f.context.keyboard_mouse;stale.generation=old_generation;
+  InitializeSRWLock(&stale.entry_lock);InitializeConditionVariable(&stale.entry_drained);
+  lvg::mouse_transport::ack_report ack{5,1,0,1};
+  HID_XFER_PACKET transfer{reinterpret_cast<PUCHAR>(&ack),sizeof(ack),5};
+  fake_operation stale_operation;
+  evt_keyboard_mouse_write_report(&stale,&stale_operation,nullptr,&transfer);
+  CHECK(stale_operation.completions==1 && stale_operation.status==STATUS_DEVICE_NOT_READY);
+  CHECK(stale.active_entries==0 && slot_of(h).core.awaiting_mouse_ack()==1);
+  lock_context(&f.context);f.context.powered=false;unlock_context(&f.context);
+  CHECK(acknowledge(h,1)==STATUS_DEVICE_NOT_READY);
+  CHECK(slot_of(h).core.awaiting_mouse_ack()==1);
+  lock_context(&f.context);f.context.powered=true;unlock_context(&f.context);
+  on_delete=[&](VHFHANDLE deleting) {
+    fake_operation retired;
+    evt_keyboard_mouse_write_report(deleting->config.VhfClientContext,&retired,nullptr,&transfer);
+    CHECK(retired.completions==1 && retired.status==STATUS_DEVICE_NOT_READY);
+  };
+  CHECK(f.abort()==STATUS_SUCCESS);
+}
+void test_mouse_ack_inline_and_uncertain_completion() {
+  {
+    fixture f;auto_mouse_ack=false;CHECK(f.open()==STATUS_SUCCESS);auto *h=handles.back().get();
+    auto button=lvg::km::request<lvg::km::button_request>();button.button=1;button.pressed=1;
+    auto motion=lvg::km::request<lvg::km::relative_request>();motion.x=11;
+    CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+    CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+    button.pressed=0;CHECK(f.send(lvg::km::ioctl_button,button)==STATUS_SUCCESS);
+    on_complete=[&]{ready(h);}; // Completing ACK may synchronously issue the next HID read.
+    on_submit=[&](VHFHANDLE current){CHECK(acknowledge(current,current->pending_mouse_ack)==STATUS_SUCCESS);};
+    ready(h);
+    CHECK(submits==3 && h->max_submit_depth==1);
+    CHECK(slot_of(h).core.pending()==0 && slot_of(h).core.awaiting_mouse_ack()==0);
+    CHECK(callback_of(h).active_entries==0);
+    on_submit={};on_complete={};
+  }
+  {
+    fixture f;auto_mouse_ack=false;on_start=[](VHFHANDLE h){ready(h);};
+    CHECK(f.open()==STATUS_SUCCESS);auto *h=handles.back().get();
+    auto motion=lvg::km::request<lvg::km::relative_request>();motion.x=11;
+    CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+    CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+    ready(h);CHECK(submits==1);
+    complete_result=STATUS_DEVICE_NOT_READY;
+    on_complete=[&] {
+      ready(h); // Failure is only returned after this reentrant readiness.
+      CHECK(submits==1 && slot_of(h).core.awaiting_mouse_ack()==1);
+    };
+    CHECK(acknowledge(h,1)==STATUS_SUCCESS);
+    on_complete={};
+    CHECK(slot_of(h).core.lifecycle()==keyboard_mouse_endpoint::state::faulted);
+    CHECK(submits==1 && slot_of(h).core.pending()==0);
+    complete_result=STATUS_SUCCESS;
+  }
+}
+void test_mouse_ack_reservation_races() {
+  fixture f;auto_mouse_ack=false;on_start=[](VHFHANDLE h){ready(h);};
+  CHECK(f.open()==STATUS_SUCCESS);auto *h=handles.back().get();
+  auto motion=lvg::km::request<lvg::km::relative_request>();motion.x=1;
+  CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+  CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+  ready(h);CHECK(submits==1);
+  std::promise<void> entered_promise,resume_promise;
+  auto entered=entered_promise.get_future();auto resume=resume_promise.get_future().share();
+  std::atomic<bool> first_complete{true};
+  on_complete=[&] {
+    if(first_complete.exchange(false)) { entered_promise.set_value();resume.wait(); }
+  };
+  auto ack=std::async(std::launch::async,[&]{return acknowledge(h,1);});
+  const bool paused=entered.wait_for(std::chrono::seconds(3))==std::future_status::ready;
+  CHECK(paused);
+  if(!paused){resume_promise.set_value();ack.get();on_complete={};return;}
+  // A readiness callback on another thread cannot use a provisional ACK;
+  // another write cannot reserve the same ACK or the not-yet-sent next one.
+  ready(h);CHECK(submits==1 && slot_of(h).core.awaiting_mouse_ack()==1);
+  CHECK(acknowledge(h,1)==STATUS_INVALID_PARAMETER);
+  CHECK(acknowledge(h,2)==STATUS_INVALID_PARAMETER);
+  CHECK(submits==1 && slot_of(h).core.awaiting_mouse_ack()==1);
+  resume_promise.set_value();CHECK(ack.get()==STATUS_SUCCESS);on_complete={};
+  CHECK(submits==2 && slot_of(h).core.awaiting_mouse_ack()==2);
+  CHECK(callback_of(h).active_entries==0);
+}
+void test_mouse_ack_callback_rundown() {
+  fixture f;auto_mouse_ack=false;on_start=[](VHFHANDLE h){ready(h);};
+  CHECK(f.open()==STATUS_SUCCESS);auto *h=handles.back().get();
+  auto motion=lvg::km::request<lvg::km::relative_request>();motion.x=1;
+  CHECK(f.send(lvg::km::ioctl_relative,motion)==STATUS_SUCCESS);
+  std::promise<void> entered_promise,resume_promise;
+  auto entered=entered_promise.get_future();auto resume=resume_promise.get_future().share();
+  on_complete=[&]{entered_promise.set_value();resume.wait();};
+  auto ack=std::async(std::launch::async,[&]{return acknowledge(h,1);});
+  const bool paused=entered.wait_for(std::chrono::seconds(3))==std::future_status::ready;
+  CHECK(paused);
+  if(!paused){resume_promise.set_value();ack.get();on_complete={};return;}
+  auto abort=std::async(std::launch::async,[&]{return f.abort();});
+  CHECK(abort.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout);
+  resume_promise.set_value();CHECK(ack.get()==STATUS_SUCCESS);CHECK(abort.get()==STATUS_SUCCESS);
+  on_complete={};CHECK(h->deleted && f.context.keyboard_mouse.callback_context==nullptr);
+}
 void test_failures_and_forced_delete() {
-  for(int mode=0;mode<5;++mode) {
+  for(int mode=0;mode<6;++mode) {
     fixture f;
     if(mode==0)fake_open_status=STATUS_DEVICE_NOT_READY;
     if(mode==1)fake_missing_file=true;
     if(mode==2)create_result=STATUS_NOT_SUPPORTED;
     if(mode==3)start_result=STATUS_CANCELLED;
     if(mode==4)on_start=[&](VHFHANDLE){lock_context(&f.context);f.owner_data.cleanup_started=true;unlock_context(&f.context);};
+    if(mode==5)mapper_ready=false;
     CHECK(!NT_SUCCESS(f.open()));CHECK(f.context.keyboard_mouse.state==slot_state::empty);
     CHECK(deletes==(mode>=3?1:0));
+    CHECK(submits==0);
+    if(mode==5)CHECK(mapper_waits==1);
   }
   for(int mode=0;mode<4;++mode) {
     fixture f;on_start=[](VHFHANDLE h){ready(h);};CHECK(f.open()==STATUS_SUCCESS);auto *h=handles.back().get();
@@ -655,8 +831,8 @@ NTSTATUS query(fixture &f) {
   const auto status=f.raw(lvg::km::ioctl_query,&control,sizeof(control),sizeof(control),
     &response,sizeof(response),sizeof(response),nullptr,&information);
   if(NT_SUCCESS(status)) {
-    CHECK(information==sizeof(response));CHECK(response.capabilities==lvg::km::k_primary_capabilities);
-    CHECK(response.absolute_target_generation==lvg::km::k_primary_absolute_generation);
+    CHECK(information==sizeof(response));CHECK(response.capabilities==lvg::km::k_ordered_capabilities);
+    CHECK(response.absolute_target_generation==lvg::km::k_virtual_desktop_absolute_generation);
   }
   return status;
 }
@@ -903,7 +1079,7 @@ void test_client_chain() {
   CHECK(client.connect()==ERROR_SUCCESS);CHECK(opens==1);CHECK(client.connected());
   const auto gamepad_features=client.available_features();CHECK((gamepad_features&lvg::feature_input_state)!=0);
   lvg::km::query_response query{};CHECK(client.query_keyboard_mouse(&query)==ERROR_SUCCESS);
-  CHECK(query.capabilities==lvg::km::k_primary_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_primary_absolute_generation);
+  CHECK(query.capabilities==lvg::km::k_ordered_capabilities);CHECK(query.absolute_target_generation==lvg::km::k_virtual_desktop_absolute_generation);
   for(int mode=0;mode<5;++mode) {
     on_reply=[&](DWORD code,void *raw,DWORD *bytes) {
       if(code!=lvg::km::ioctl_query)return;
@@ -911,12 +1087,28 @@ void test_client_chain() {
       if(mode==0)--*bytes;
       if(mode==1)response->prefix.version++;
       if(mode==2)response->reserved=1;
-      if(mode==3)response->capabilities&=~lvg::km::bound_absolute_mouse;
+      if(mode==3)response->capabilities&=~lvg::km::ordered_mouse;
       if(mode==4)response->absolute_target_generation=0;
     };
     CHECK(client.query_keyboard_mouse(&query)==ERROR_INVALID_DATA);
     CHECK(query.capabilities==0);CHECK(query.absolute_target_generation==0);
   }
+  on_reply=[&](DWORD code,void *raw,DWORD *) {
+    if(code==lvg::km::ioctl_query)static_cast<lvg::km::query_response *>(raw)->capabilities &= ~lvg::km::consumer;
+  };
+  CHECK(client.query_keyboard_mouse(&query)==ERROR_SUCCESS);
+  CHECK((query.capabilities & lvg::km::consumer)==0);
+  on_reply=[&](DWORD code,void *raw,DWORD *) {
+    if(code!=lvg::km::ioctl_query)return;
+    auto *response=static_cast<lvg::km::query_response *>(raw);
+    response->capabilities=lvg::km::k_primary_capabilities;
+    response->absolute_target_generation=lvg::km::k_primary_absolute_generation;
+  };
+  CHECK(client.query_keyboard_mouse(&query)==ERROR_SUCCESS);
+  on_reply=[&](DWORD code,void *raw,DWORD *) {
+    if(code==lvg::km::ioctl_query)static_cast<lvg::km::query_response *>(raw)->capabilities |= lvg::km::relative_mouse;
+  };
+  CHECK(client.query_keyboard_mouse(&query)==ERROR_INVALID_DATA);
   on_reply={};
   CHECK(client.available_features()==gamepad_features);
   on_start=[](VHFHANDLE h){ready(h);};CHECK(client.open_keyboard_mouse()==ERROR_SUCCESS);
@@ -966,6 +1158,7 @@ NTSTATUS VhfCreate(VHF_CONFIG *config,VHFHANDLE *out) {
     CHECK(fake_rundown_depth==0);
     CHECK(!fake_holds(slot->parent->state_lock));CHECK(fake_holds(slot->parent->lifetime_gate));
     CHECK(config->FileHandle!=nullptr);CHECK(config->VendorID==LVG_KM_VENDOR_ID);CHECK(config->ProductID==LVG_KM_PRODUCT_ID);
+    CHECK(config->VersionNumber==lvg::mouse_transport::k_hardware_revision);
     CHECK(config->ReportDescriptor==lvg::driver::keyboard_mouse_descriptor);
   } else {
     auto *slot=static_cast<controller_slot *>(config->VhfClientContext);
@@ -1040,11 +1233,21 @@ NTSTATUS VhfReadReportSubmit(VHFHANDLE h,PHID_XFER_PACKET packet) {
   ++h->submit_depth;h->max_submit_depth=std::max(h->max_submit_depth,h->submit_depth);
   CHECK(packet->reportBuffer!=nullptr);CHECK(packet->reportBufferLen<=30);
   h->retained=packet;h->packet=*packet;h->bytes.assign(packet->reportBuffer,packet->reportBuffer+packet->reportBufferLen);
+  if(packet->reportId==lvg::mouse_transport::k_report_id) {
+    lvg::mouse_transport::report mouse{};std::memcpy(&mouse,h->bytes.data(),sizeof(mouse));
+    CHECK(lvg::mouse_transport::valid(mouse));
+    CHECK(h->pending_mouse_ack==0);h->pending_mouse_ack=mouse.sequence;
+  }
   if(on_submit)on_submit(h);
   --h->submit_depth;
   return submit_result;
 }
-NTSTATUS VhfAsyncOperationComplete(VHFOPERATIONHANDLE op,NTSTATUS status) {++op->completions;op->status=status;return STATUS_SUCCESS;}
+NTSTATUS VhfAsyncOperationComplete(VHFOPERATIONHANDLE op,NTSTATUS status) {
+  CHECK(fake_rundown_depth==0);
+  ++op->completions;op->status=status;
+  if(on_complete)on_complete();
+  return complete_result;
+}
 DWORD GetLastError(){return last_error;}
 void *LocalAlloc(DWORD,size_t bytes){return std::calloc(1,bytes);}
 void *LocalFree(void *p){std::free(p);return nullptr;}
@@ -1073,4 +1276,4 @@ BOOL DeviceIoControl(HANDLE handle,DWORD code,void *input,DWORD input_size,void 
   if(forced_reply_error!=ERROR_SUCCESS){last_error=forced_reply_error;return FALSE;}
   return NT_SUCCESS(status)?TRUE:FALSE;
 }
-int main(int argc,char **argv){if(argc==2 && std::strcmp(argv[1],"--retirement-only")==0){test_power_retirement_minimal();}else if(argc==2 && std::strcmp(argv[1],"--power-only")==0){test_power_contracts();}else{test_keyboard_mouse_authorization();test_power_contracts();test_raw_boundaries();test_fifo_and_drain();test_consumer_transport();test_absolute_mouse_drag_transport();test_failures_and_forced_delete();test_cleanup_during_start();test_submit_rundown_and_late_delete_callback();test_rundown_wait_failure_fallback_drains();test_mixed_keyboard_mouse_and_controller_teardown_order();test_submission_reply_validation();test_client_chain();}std::printf("KM actual driver/client transport: %d checks, %d failures\n",checks.load(),failures.load());return failures==0?0:1;}
+int main(int argc,char **argv){if(argc==2 && std::strcmp(argv[1],"--retirement-only")==0){test_power_retirement_minimal();}else if(argc==2 && std::strcmp(argv[1],"--power-only")==0){test_power_contracts();}else{test_keyboard_mouse_authorization();test_power_contracts();test_raw_boundaries();test_fifo_and_drain();test_consumer_transport();test_absolute_mouse_drag_transport();test_mouse_ack_gate_and_validation();test_mouse_ack_inline_and_uncertain_completion();test_mouse_ack_reservation_races();test_mouse_ack_callback_rundown();test_failures_and_forced_delete();test_cleanup_during_start();test_submit_rundown_and_late_delete_callback();test_rundown_wait_failure_fallback_drains();test_mixed_keyboard_mouse_and_controller_teardown_order();test_submission_reply_validation();test_client_chain();}std::printf("KM actual driver/client transport: %d checks, %d failures\n",checks.load(),failures.load());return failures==0?0:1;}

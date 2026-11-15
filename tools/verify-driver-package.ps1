@@ -22,6 +22,10 @@ param(
 
     [string] $SignToolPath,
 
+    # Attestation/HLK-signed catalog for the exact locally built mapper INF/SYS.
+    [string] $KernelSignedMapperCatalog,
+    [switch] $RequireKernelSigning,
+
     [switch] $AllowLocalTestCertificate,
 
     # Write a manifest for a package that is shipped unsigned on purpose,
@@ -89,19 +93,30 @@ $driverDir = Join-Path $PackageDir 'driver'
 $inf = Join-Path $driverDir 'VibeshineVhfGamepad.inf'
 $dll = Join-Path $driverDir 'VibeshineVhfGamepad.dll'
 $catalog = Join-Path $driverDir 'VibeshineVhfGamepad.cat'
+$mapperInf = Join-Path $PackageDir 'mouse_mapper/VibeshineVhfMouseMapper.inf'
+$mapperSys = Join-Path $PackageDir 'mouse_mapper/VibeshineVhfMouseMapper.sys'
+$mapperCatalog = Join-Path $PackageDir 'mouse_mapper/VibeshineVhfMouseMapper.cat'
 $certificatePath = Join-Path $driverDir 'VibeshineVhfGamepad.cer'
 $deviceSetup = Join-Path $PackageDir 'tools/VibeshineVhfGamepadDeviceSetup.exe'
 
-foreach ($file in @($inf, $dll, $catalog, $deviceSetup)) {
+foreach ($file in @($inf, $dll, $catalog, $deviceSetup, $mapperInf, $mapperSys, $mapperCatalog)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw "Driver package is missing '$file'."
     }
 }
 
-$infDriverVer = Select-String -LiteralPath $inf -Pattern '^DriverVer=(.+)$' | Select-Object -First 1
-if ($null -eq $infDriverVer -or $infDriverVer.Matches[0].Groups[1].Value.Trim() -ne $DriverVer) {
-    throw "The staged INF DriverVer does not match -DriverVer '$DriverVer'."
+foreach ($stagedInf in @($inf, $mapperInf)) {
+    $infDriverVer = Select-String -LiteralPath $stagedInf -Pattern '^DriverVer=(.+)$' | Select-Object -First 1
+    if ($null -eq $infDriverVer -or $infDriverVer.Matches[0].Groups[1].Value.Trim() -ne $DriverVer) {
+        throw "The staged INF DriverVer does not match -DriverVer '$DriverVer'."
+    }
 }
+
+$identityMatches = [regex]::Matches((Get-Content -LiteralPath $mapperInf -Raw), 'HID\\VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})&REV_0100&Col02')
+if ($identityMatches.Count -ne 1) { throw 'Mapper INF must contain exactly one owned revision/collection identity.' }
+$mapperVendorId = [Convert]::ToUInt16($identityMatches[0].Groups[1].Value, 16)
+$mapperProductId = [Convert]::ToUInt16($identityMatches[0].Groups[2].Value, 16)
+if ($mapperVendorId -eq 0 -or $mapperProductId -eq 0) { throw 'Mapper INF identity must be numerically nonzero.' }
 
 $catalogMembership = $null
 if ($UnsignedForMsiSigning) {
@@ -123,6 +138,9 @@ if ($UnsignedForMsiSigning) {
     }
 
     $membershipFiles = [ordered]@{
+        'mouse_mapper/VibeshineVhfMouseMapper.inf' = $mapperInf
+        'mouse_mapper/VibeshineVhfMouseMapper.sys' = $mapperSys
+        'mouse_mapper/VibeshineVhfMouseMapper.cat' = $mapperCatalog
         'driver/VibeshineVhfGamepad.inf' = $inf
         'driver/VibeshineVhfGamepad.dll' = $dll
         'driver/VibeshineVhfGamepad.cat' = $catalog
@@ -151,6 +169,28 @@ if ($UnsignedForMsiSigning) {
 $signTool = $null
 if (-not $UnsignedForMsiSigning) {
     $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+}
+# Importing a Microsoft-signed CAT never changes the catalog-bound INF/SYS.
+# Verify the replacement against those exact bytes before publishing hashes.
+$kernelSigning = 'requires-microsoft-signing'
+if (-not [string]::IsNullOrWhiteSpace($KernelSignedMapperCatalog)) {
+    $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+    foreach ($payload in @($mapperInf, $mapperSys)) {
+        & $signTool verify '/v' '/kp' '/c' $KernelSignedMapperCatalog $payload
+        if ($LASTEXITCODE -ne 0) { throw "Microsoft kernel catalog policy/membership verification failed for '$payload'." }
+    }
+    Copy-Item -LiteralPath $KernelSignedMapperCatalog -Destination $mapperCatalog -Force
+    $kernelSigning = 'windows-kernel-policy'
+    if ($null -ne $catalogMembership) {
+        $catalogMembership.files['mouse_mapper/VibeshineVhfMouseMapper.cat'] = Get-Sha256 -Path $mapperCatalog
+    }
+} elseif ($RequireKernelSigning -or (-not $UnsignedForMsiSigning -and -not $AllowLocalTestCertificate)) {
+    $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
+    foreach ($payload in @($mapperInf, $mapperSys)) {
+        & $signTool verify '/v' '/kp' '/c' $mapperCatalog $payload
+        if ($LASTEXITCODE -ne 0) { throw "Production mapper requires a Microsoft attestation/HLK-signed catalog bound to '$payload'. Ordinary MSI signing is insufficient." }
+    }
+    $kernelSigning = 'windows-kernel-policy'
 }
 $testCertificate = $null
 if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
@@ -228,6 +268,10 @@ if ($usesLocalTestCertificate -and $deviceSetupSignature.SignerCertificate.Thumb
 }
 
 if ($UnsignedForMsiSigning) {
+    if ($kernelSigning -ceq 'requires-microsoft-signing') {
+        Assert-UnsignedAuthenticode -Path $mapperCatalog
+        Assert-UnsignedAuthenticode -Path $mapperSys
+    }
     foreach ($unsignedPayload in @($catalog, $dll, $deviceSetup)) {
         Assert-UnsignedAuthenticode -Path $unsignedPayload
     }
@@ -245,9 +289,17 @@ if ($usesLocalTestCertificate) {
         throw 'The package public certificate does not match the root-device setup tool signer.'
     }
     $signingChannel = 'self-signed-local-test'
+    $kernelSigning = 'self-signed-local-test'
+    foreach ($payload in @($mapperCatalog, $mapperSys)) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $payload
+        if ($null -eq $signature.SignerCertificate -or $signature.Status -eq 'HashMismatch' -or $signature.SignerCertificate.Thumbprint -ine $certificateThumbprint) { throw "Local mapper signer mismatch: $payload" }
+    }
 }
 
 $relativeFiles = @(
+    'mouse_mapper/VibeshineVhfMouseMapper.inf',
+    'mouse_mapper/VibeshineVhfMouseMapper.sys',
+    'mouse_mapper/VibeshineVhfMouseMapper.cat',
     'driver/VibeshineVhfGamepad.inf',
     'driver/VibeshineVhfGamepad.dll',
     'driver/VibeshineVhfGamepad.cat',
@@ -268,6 +320,8 @@ $files = $relativeFiles | ForEach-Object {
 
 $manifest = [ordered]@{
     schema_version = 1
+    features = [ordered]@{ mouse_mapper = 1 }
+    mouse_mapper = [ordered]@{ transport_version = 1; vendor_id = $mapperVendorId; product_id = $mapperProductId; kernel_signing = $kernelSigning }
     source_revision = $SourceRevision.ToLowerInvariant()
     driver_ver = $DriverVer
     platform = $Platform

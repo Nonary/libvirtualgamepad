@@ -34,12 +34,46 @@ fix is independent, except for additive test CMake reconciliation.
 ## Build and capabilities
 
 The UMDF project defaults `LvgEnableKeyboardMouseSource` to true. Vendor and
-product IDs default to zero, optional values supported by VHF; a project-owned
-identity can override them. Gamepad protocol 2 is unchanged. The query reports
-keyboard, relative mouse, wheel detents, consumer keys, and an absolute pointer
-bound to the primary display. `primary_absolute_mouse` distinguishes that
-domain from a virtual desktop. Generation 1 represents this primary-display
-domain; the host must account for changes in display geometry.
+product IDs default to zero in source fixtures. Production packages require
+explicit nonzero project-owned IDs, and bind the mapper to their exact
+`HID\\VID_xxxx&PID_yyyy&REV_0100&Col02` identity. Revision `0x0100` is shared
+through `mouse_transport::k_hardware_revision`. Usage and container validation
+provide additional runtime binding checks. Gamepad protocol 2 is unchanged. The query reports
+keyboard, consumer keys, `ordered_mouse` and `virtual_desktop_absolute`.
+Generation 2 identifies normalized virtual-desktop coordinates. Relative and
+absolute motion, buttons and wheels use one vendor HID TLC and the owned kernel
+mapper, rather than separate Mouhid mouse collections. The producer does not
+advertise legacy mouse capability bits. A new host must require the ordered
+capabilities; the client library can still query a legacy driver so callers can
+choose their documented fallback before accepting HID input.
+
+The packed little-endian wire report is defined by `mouse_transport.h`: report
+ID 2, version 1, flags (0 relative, 3 absolute+virtual desktop, or 4 strict-neutral
+close-purge marker), five-button
+bitmap, zero reserved byte, signed 16-bit wheel/pan in Windows 120ths, signed
+32-bit X/Y (raw relative counts or normalized absolute 0..65535), and nonzero
+32-bit sequence. All accepted mouse reports preserve FIFO order; duplicate
+button state and empty relative requests enqueue nothing. Full queues reject
+before changing state or sequence. Normal mouse sequences must be contiguous, including wrap skipping zero.
+Normal close marks its neutral mouse report with flag 4, zero buttons, zero
+coordinates and zero wheels. Only this marker allows a monotonic forward
+sequence gap (less than half the 32-bit sequence range), so a legitimate close
+purge cannot conceal unexplained input loss during normal operation. The mapper returns output report ID 5, version 1, zero reserved field, and the
+exact 32-bit input sequence only after all generated Mouclass packets were
+consumed by the class callback. The producer admits at most one unacknowledged
+mouse report to VHF; keyboard/consumer heads can continue independently. VHF
+ready credit cannot release this gate, and the in-flight mouse sequence is
+separate from retained report bytes. A matching ACK is first reserved while
+that gate remains closed. Only a successful `VhfAsyncOperationComplete` return
+and current-activation revalidation commit the ACK. Concurrent/duplicate ACKs
+cannot reserve it twice, and reentrant readiness during failed completion
+cannot admit the next mouse report. No sequence/ready/class-ACK result claims
+desktop delivery, and no accepted or uncertain event is replayed.
+
+After VhfStart, open waits at most two seconds for the mapper on the exact
+container to report class connection, D0 and reader readiness. Failure stops
+admission and synchronously deletes the child before returning an error. The
+bounded initialization wait does not run between mouse events.
 
 ## Separate control ABI
 
@@ -135,6 +169,12 @@ which can delete an unstarted handle. The readiness buffering contract permits
 one submission per callback and retains the transfer buffer until the next
 [ready notification](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/vhf/nf-vhf-vhfreadreportsubmit).
 
+The Microsoft [EvtVhfCleanup contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/vhf/nc-vhf-evt_vhf_cleanup)
+states that VHF has no asynchronous operations pending before cleanup and that
+cleanup runs before `VhfDelete(TRUE)` returns. That supports draining the ACK
+write operation itself. The producer additionally counts admitted callback
+entries because its work can continue after completing an async operation.
+
 **Unqualified native assumption:** reclaiming the per-activation context relies
 on VhfUm quiescing ready-callback entry by synchronous delete return, including
 already-dispatched entries not yet counted by this source. The general reference
@@ -144,8 +184,12 @@ An OS call/submit that never returns can hold synchronous rundown open; this
 source does not claim a driver-enforced timeout or a native watchdog fix.
 
 Normal close purges queued input, appends neutral keyboard/buttons/consumer
-reports, and preserves the in-flight report until readiness. After the last neutral is retired
-does a subsequent close delete and succeed. Abort force-removes KM without
+reports, and preserves the in-flight report until readiness. An outstanding
+mouse class ACK survives the purge and blocks the neutral mouse report until
+the previous mouse report was consumed. Both the neutral mouse ACK and final
+VHF report retirement are required before a subsequent close deletes and
+succeeds. Missing ACKs do not authorize replay; abort remains the synchronous
+child-removal boundary. Abort force-removes KM without
 closing the shared client or controller children. Abort success proves removal,
 not neutral delivery; a failed abort leaves client-side removal unproven.
 
@@ -169,6 +213,6 @@ not use-after-free invocations forbidden by the modeled native contract.
 
 See [the validation record](keyboard-mouse-validation.md) for earlier checks and
 negative controls. A real Windows run must still verify callback lifetime,
-primary-display mapping, power transitions, process-death cleanup, typematic,
+virtual-desktop mapping and mixed relative/absolute ordering, power transitions, process-death cleanup, typematic,
 layouts, Raw Input and multi-client behavior. The source change does not by
 itself publish a signed producer release or update a consumer's pinned package.

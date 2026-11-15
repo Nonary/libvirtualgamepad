@@ -98,7 +98,7 @@
 
   <ItemDefinitionGroup Condition="'$(LvgEnableKeyboardMouseSource)' == 'true'">
     <ClCompile>
-      <PreprocessorDefinitions>LVG_ENABLE_KEYBOARD_MOUSE_SOURCE=1;LVG_KM_VENDOR_ID=$(LvgKeyboardMouseVendorId);LVG_KM_PRODUCT_ID=$(LvgKeyboardMouseProductId);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>LVG_ENABLE_KEYBOARD_MOUSE_SOURCE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
 
@@ -135,5 +135,6 @@
     <None Include="VibeshineVhfGamepad.inf.in" />
   </ItemGroup>
 
+  <Import Project="MouseIdentity.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -22,24 +22,30 @@ km::button_request button(std::uint8_t number, bool pressed = true) {
 km::relative_request motion(std::int16_t x, std::int16_t y = 0, std::int8_t wheel = 0, std::int8_t pan = 0) {
   auto value = km::request<km::relative_request>(); value.x = x; value.y = y; value.wheel = wheel; value.pan = pan; return value;
 }
+bool acknowledge(E &endpoint, std::uint32_t sequence) {
+  return endpoint.reserve_mouse_ack(sequence) && endpoint.commit_mouse_ack(sequence);
+}
 E::report drain(E &endpoint) {
+  if (endpoint.awaiting_mouse_ack()) CHECK(acknowledge(endpoint, endpoint.awaiting_mouse_ack()));
   endpoint.ready_for_report();
   const auto *value = endpoint.take_report();
   CHECK(value != nullptr);
   return value ? *value : E::report {};
 }
 bool down(const E::report &report, std::uint16_t usage) { return (report.bytes[1 + usage / 8] & (1u << (usage % 8))) != 0; }
-std::int16_t signed16(const E::report &report, std::size_t offset) {
-  return static_cast<std::int16_t>(report.bytes[offset] | (report.bytes[offset + 1] << 8));
+lvg::mouse_transport::report mouse(const E::report &source) {
+  lvg::mouse_transport::report value {};
+  CHECK(source.id == lvg::mouse_transport::k_report_id);
+  CHECK(source.length == sizeof(value));
+  std::memcpy(&value, source.bytes.data(), sizeof(value));
+  CHECK(lvg::mouse_transport::valid(value));
+  return value;
 }
 void test_descriptor() {
-  // Parse the real descriptor's short items; check bit lengths, absolute vs
-  // relative semantics and signed ranges, rather than searching source text.
-  std::array<unsigned, 5> bits {};
+  std::array<unsigned, 6> bits {};
+  unsigned ack_bits = 0;
   unsigned report = 0, size = 0, count = 0, page = 0, usage = 0, depth = 0, top = 0;
-  int minimum = 0, maximum = 0;
-  int physical_minimum = 0, physical_maximum = 0;
-  bool saw_xy = false, saw_wheel = false, saw_pan = false, saw_absolute = false;
+  unsigned mouse_collections = 0, vendor_collections = 0;
   const auto *bytes = lvg::driver::keyboard_mouse_descriptor;
   const auto length = lvg::driver::keyboard_mouse_descriptor_size;
   for (std::size_t cursor = 0; cursor < length;) {
@@ -53,34 +59,26 @@ void test_descriptor() {
     const unsigned tag = prefix & 0xFC;
     if (tag == 0x04) page = value;
     if (tag == 0x08) usage = value;
-    if (tag == 0x14) minimum = n == 1 ? static_cast<std::int8_t>(value) : n == 2 ? static_cast<std::int16_t>(value) : static_cast<int>(value);
-    if (tag == 0x24) maximum = minimum < 0 ? (n == 1 ? static_cast<std::int8_t>(value) : n == 2 ? static_cast<std::int16_t>(value) : static_cast<int>(value)) : static_cast<int>(value);
-    if (tag == 0x34) physical_minimum = static_cast<int>(value);
-    if (tag == 0x44) physical_maximum = static_cast<int>(value);
     if (tag == 0x74) size = value;
     if (tag == 0x94) count = value;
     if (tag == 0x84) report = value;
-    if (tag == 0xA0) { if (depth++ == 0) ++top; }
+    if (tag == 0xA0 && depth++ == 0) {
+      ++top;
+      if (page == 1 && usage == 2) ++mouse_collections;
+      if (page == lvg::mouse_transport::k_usage_page && usage == lvg::mouse_transport::k_usage) ++vendor_collections;
+    }
     if (tag == 0xC0) { CHECK(depth > 0); --depth; }
+    if (tag == 0x90) { CHECK(report == 5 && page == lvg::mouse_transport::k_usage_page && value == 2); ack_bits += size * count; }
     if (tag == 0x80) {
       CHECK(report > 0 && report < bits.size());
       if (report < bits.size()) bits[report] += size * count;
-      if (report == 1) { CHECK(page == 7); CHECK(size == 1 && count == 232); CHECK(value == 2); }
-      if (report == 2 && page == 1 && size == 16) { CHECK(count == 2 && minimum == -32768 && maximum == 32767 && value == 6); saw_xy = true; }
-      if (report == 2 && page == 1 && usage == 0x38) { CHECK(size == 8 && minimum == -127 && maximum == 127 && value == 6); saw_wheel = true; }
-      if (report == 2 && page == 0xC) { CHECK(usage == 0x238 && size == 8 && value == 6); saw_pan = true; }
-      if (report == 3 && value == 3) CHECK(size == 8 && count == 1);
-      if (report == 3 && page == 1 && value == 2) {
-        CHECK(size == 16 && count == 2 && minimum == 0 && maximum == 32767);
-        CHECK(physical_minimum == 0 && physical_maximum == 32767);
-        saw_absolute = true;
-      }
+      if (report == 1) CHECK(page == 7 && size == 1 && count == 232 && value == 2);
+      if (report == 2) CHECK(page == lvg::mouse_transport::k_usage_page && size == 8 && count == 21 && value == 2);
       if (report == 4 && value == 2) CHECK(page == 0x0c && size == 1 && count == 7);
     }
   }
-  CHECK(depth == 0 && top == 4);
-  CHECK(bits[1] == 232 && bits[2] == 56 && bits[3] == 40 && bits[4] == 8);
-  CHECK(saw_xy && saw_wheel && saw_pan && saw_absolute);
+  CHECK(depth == 0 && top == 3 && mouse_collections == 0 && vendor_collections == 1);
+  CHECK(bits[1] == 232 && bits[2] == 168 && bits[3] == 0 && bits[4] == 8 && ack_bits == 56);
 }
 void test_keyboard_order_and_retained_storage() {
   E endpoint;
@@ -111,6 +109,8 @@ void test_keyboard_order_and_retained_storage() {
 void test_mouse_and_absolute() {
   E endpoint; CHECK(endpoint.open(owner, 11) == R::accepted);
   CHECK(endpoint.submit(owner, button(1)) == R::accepted);
+  CHECK(endpoint.submit(owner, button(1)) == R::unchanged);
+  CHECK(endpoint.submit(owner, motion(0)) == R::unchanged);
   CHECK(endpoint.submit(owner, motion(17, -33, 1, -2)) == R::accepted);
   auto absolute = km::request<km::absolute_request>(); absolute.x = 65535; absolute.y = 32768; absolute.target_generation = 10;
   CHECK(endpoint.submit(owner, absolute) == R::not_ready);
@@ -118,35 +118,56 @@ void test_mouse_and_absolute() {
   CHECK(endpoint.submit(owner, absolute) == R::accepted);
   CHECK(endpoint.submit(owner, motion(3)) == R::accepted);
   CHECK(endpoint.submit(owner, button(1, false)) == R::accepted);
-  auto press = drain(endpoint); CHECK(press.bytes[1] == 1 && signed16(press, 2) == 0);
-  auto first = drain(endpoint); CHECK(first.id == 2 && first.length == 8 && first.bytes[1] == 1);
-  CHECK(signed16(first, 2) == 17 && signed16(first, 4) == -33 && first.bytes[6] == 1 && first.bytes[7] == 254);
-  auto report = drain(endpoint); CHECK(report.id == 3 && report.length == 6 && report.bytes[1] == 0);
-  CHECK(report.bytes[2] == 255 && report.bytes[3] == 127 && report.bytes[4] == 0 && report.bytes[5] == 64);
-  auto second = drain(endpoint); CHECK(signed16(second, 2) == 3 && second.bytes[1] == 1);
-  CHECK(drain(endpoint).bytes[1] == 0);
-  CHECK(endpoint.submit(owner, motion(-32768, 32767)) == R::accepted);
-  auto limits = drain(endpoint); CHECK(signed16(limits, 2) == -32768 && signed16(limits, 4) == 32767);
+  auto press = mouse(drain(endpoint)); CHECK(press.buttons == 1 && press.x == 0 && press.sequence == 1 && press.flags == 0);
+  auto first = mouse(drain(endpoint)); CHECK(first.buttons == 1 && first.sequence == 2);
+  CHECK(first.x == 17 && first.y == -33 && first.wheel == 120 && first.pan == -240);
+  auto report = mouse(drain(endpoint)); CHECK(report.flags == lvg::mouse_transport::k_absolute_flags && report.sequence == 3);
+  CHECK(report.x == 65535 && report.y == 32768 && report.buttons == 1);
+  auto second = mouse(drain(endpoint)); CHECK(second.x == 3 && second.buttons == 1 && second.sequence == 4);
+  auto release = mouse(drain(endpoint)); CHECK(release.buttons == 0 && release.sequence == 5);
+  CHECK(endpoint.submit(owner, motion(-32768, 32767, -127, 127)) == R::accepted);
+  auto limits = mouse(drain(endpoint)); CHECK(limits.x == -32768 && limits.y == 32767);
+  CHECK(limits.wheel == -15240 && limits.pan == 15240);
+  CHECK(lvg::mouse_transport::next_sequence(UINT32_MAX) == 1);
+  CHECK(lvg::mouse_transport::next_sequence(0) == 1);
+  auto invalid = limits; invalid.flags = 1; CHECK(!lvg::mouse_transport::valid(invalid));
+  invalid = limits; invalid.flags = 3; CHECK(!lvg::mouse_transport::valid(invalid));
+  invalid = limits; invalid.buttons = 0x20; CHECK(!lvg::mouse_transport::valid(invalid));
+  invalid = limits; invalid.sequence = 0; CHECK(!lvg::mouse_transport::valid(invalid));
+  lvg::mouse_transport::report purge {2,1,lvg::mouse_transport::k_purge,0,0,0,0,0,0,7};
+  CHECK(lvg::mouse_transport::valid(purge));
+  for (unsigned field = 0; field < 6; ++field) {
+    auto malformed = purge;
+    if (field == 0) malformed.buttons = 1;
+    if (field == 1) malformed.x = 1;
+    if (field == 2) malformed.y = -1;
+    if (field == 3) malformed.wheel = 120;
+    if (field == 4) malformed.pan = -120;
+    if (field == 5) malformed.flags |= lvg::mouse_transport::k_absolute;
+    CHECK(!lvg::mouse_transport::valid(malformed));
+  }
   E unbound; CHECK(unbound.open(owner) == R::accepted);
   CHECK(unbound.submit(owner, absolute) == R::unsupported);
 }
 void test_backpressure_is_atomic() {
-  E endpoint; CHECK(endpoint.open(owner) == R::accepted);
+  E endpoint; CHECK(endpoint.open(owner, 11) == R::accepted);
   for (std::size_t i = 0; i < E::queue_capacity; ++i) CHECK(endpoint.submit(owner, motion(1)) == R::accepted);
   CHECK(endpoint.submit(owner, key(4)) == R::busy);
   CHECK(endpoint.submit(owner, button(1)) == R::busy);
+  auto absolute = km::request<km::absolute_request>(); absolute.target_generation = 11;
+  CHECK(endpoint.submit(owner, absolute) == R::busy);
   CHECK(endpoint.pending() == E::queue_capacity);
-  CHECK(signed16(drain(endpoint), 2) == 1);
+  CHECK(mouse(drain(endpoint)).x == 1);
   // The rejected press must not have changed held state, so retry is accepted.
   CHECK(endpoint.submit(owner, key(4)) == R::accepted);
-  CHECK(signed16(drain(endpoint), 2) == 1);
+  CHECK(mouse(drain(endpoint)).x == 1);
   CHECK(endpoint.submit(owner, button(1)) == R::accepted);
   std::size_t movements = 2;
   while (endpoint.pending()) {
     const auto report = drain(endpoint);
     if (report.id == 1) CHECK(down(report, 4));
-    else if (signed16(report, 2) == 1) ++movements;
-    else CHECK(report.bytes[1] == 1);
+    else if (mouse(report).x == 1) ++movements;
+    else { auto value = mouse(report); CHECK(value.buttons == 1 && value.sequence == 65); }
   }
   CHECK(movements == E::queue_capacity);
 }
@@ -172,6 +193,7 @@ void test_cleanup_and_fault() {
   endpoint.ready_for_report(); const auto *retained = endpoint.take_report(); CHECK(retained != nullptr);
   const auto copy = *retained;
   CHECK(endpoint.submit(owner, button(1)) == R::accepted);
+  CHECK(endpoint.submit(owner, motion(7)) == R::accepted);
   CHECK(endpoint.close(owner + 1) == R::not_owner);
   CHECK(endpoint.close(owner) == R::accepted);
   CHECK(endpoint.close(owner) == R::unchanged);
@@ -182,7 +204,8 @@ void test_cleanup_and_fault() {
   CHECK(neutral_key.id == 1);
   for (std::size_t i = 1; i < neutral_key.length; ++i) CHECK(neutral_key.bytes[i] == 0);
   const auto neutral_mouse = drain(endpoint);
-  CHECK(neutral_mouse.id == 2 && neutral_mouse.bytes[1] == 0);
+  CHECK(mouse(neutral_mouse).buttons == 0 && mouse(neutral_mouse).sequence == 3 &&
+        mouse(neutral_mouse).flags == lvg::mouse_transport::k_purge);
   const auto neutral_consumer = drain(endpoint);
   CHECK(neutral_consumer.id == 4 && neutral_consumer.bytes[1] == 0);
   CHECK(endpoint.lifecycle() == E::state::closing);
@@ -201,6 +224,49 @@ void test_cleanup_and_fault() {
   endpoint.ready_for_report(); CHECK(endpoint.take_report() == nullptr);
   CHECK(endpoint.open(owner) == R::busy);
 }
+void test_class_ack_gate() {
+  E endpoint; CHECK(endpoint.open(owner, 11) == R::accepted);
+  CHECK(endpoint.submit(owner, button(1)) == R::accepted);
+  CHECK(endpoint.submit(owner, key(4)) == R::accepted);
+  CHECK(endpoint.submit(owner, motion(7)) == R::accepted);
+  endpoint.ready_for_report();
+  CHECK(mouse(*endpoint.take_report()).sequence == 1);
+  CHECK(endpoint.awaiting_mouse_ack() == 1);
+  CHECK(!endpoint.commit_mouse_ack(1));
+  endpoint.ready_for_report();
+  CHECK(endpoint.take_report()->id == 1); // Keyboard may replace retained bytes.
+  endpoint.ready_for_report();
+  CHECK(endpoint.take_report() == nullptr); // Readiness cannot open mouse gate.
+  CHECK(!acknowledge(endpoint, 0) && !acknowledge(endpoint, 2));
+  CHECK(endpoint.awaiting_mouse_ack() == 1);
+  CHECK(endpoint.reserve_mouse_ack(1));
+  CHECK(!endpoint.reserve_mouse_ack(1) && !endpoint.reserve_mouse_ack(2));
+  endpoint.ready_for_report();CHECK(endpoint.take_report() == nullptr);
+  CHECK(!endpoint.commit_mouse_ack(2));
+  CHECK(endpoint.awaiting_mouse_ack() == 1);
+  CHECK(endpoint.commit_mouse_ack(1));
+  CHECK(!acknowledge(endpoint, 1)); // Duplicate is never a second grant.
+  CHECK(mouse(*endpoint.take_report()).sequence == 2);
+  CHECK(endpoint.submit(owner, motion(9)) == R::accepted);
+  CHECK(endpoint.close(owner) == R::accepted); // Purge motion 3, preserve ACK 2.
+  CHECK(endpoint.awaiting_mouse_ack() == 2);
+  endpoint.ready_for_report(); CHECK(endpoint.take_report()->id == 1);
+  endpoint.ready_for_report(); CHECK(endpoint.take_report() == nullptr);
+  CHECK(acknowledge(endpoint, 2));
+  const auto neutral = mouse(*endpoint.take_report());
+  CHECK(neutral.buttons == 0 && neutral.sequence == 4 && neutral.flags == lvg::mouse_transport::k_purge);
+  endpoint.ready_for_report(); CHECK(endpoint.take_report()->id == 4);
+  endpoint.ready_for_report(); CHECK(endpoint.lifecycle() == E::state::closing);
+  CHECK(!acknowledge(endpoint, 2));
+  CHECK(acknowledge(endpoint, 4));
+  CHECK(endpoint.lifecycle() == E::state::drained);
+  endpoint.reset_after_device_deleted();
+  CHECK(!acknowledge(endpoint, 4));
+  CHECK(endpoint.open(owner) == R::accepted);
+  CHECK(endpoint.submit(owner, motion(1)) == R::accepted);
+  endpoint.ready_for_report(); CHECK(mouse(*endpoint.take_report()).sequence == 1);
+  endpoint.submission_failed(); CHECK(!acknowledge(endpoint, 1));
+}
 void test_request_validation() {
   E endpoint; CHECK(endpoint.open(0) == R::invalid); CHECK(endpoint.open(owner) == R::accepted);
   CHECK(endpoint.submit(owner + 1, key(4)) == R::not_owner);
@@ -218,7 +284,7 @@ void test_request_validation() {
 }
 int main() {
   test_descriptor(); test_keyboard_order_and_retained_storage(); test_mouse_and_absolute(); test_consumer_input();
-  test_backpressure_is_atomic(); test_cleanup_and_fault(); test_request_validation();
+  test_backpressure_is_atomic(); test_cleanup_and_fault(); test_class_ack_gate(); test_request_validation();
   std::printf("Keyboard/mouse producer core: %d checks, %d failures\n", checks, failures);
   return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -81,6 +81,17 @@ try {
         throw 'Catalog normalization accepted a different catalog name.'
     }
 
+    $mapperDir = Join-Path $testRoot 'mapper'
+    New-Item -ItemType Directory -Path $mapperDir -Force | Out-Null
+    $lowerMapper = Join-Path $mapperDir 'vibeshinevhfmousemapper.cat'
+    [System.IO.File]::WriteAllBytes($lowerMapper, [byte[]] @(9, 10, 11))
+    $mapperHash = (Get-FileHash -LiteralPath $lowerMapper -Algorithm SHA256).Hash
+    $normalizedMapper = & $normalizer -DriverDir $mapperDir -CatalogName 'VibeshineVhfMouseMapper.cat'
+    if ((Split-Path -Leaf $normalizedMapper) -cne 'VibeshineVhfMouseMapper.cat' -or
+        (Get-FileHash -LiteralPath $normalizedMapper -Algorithm SHA256).Hash -cne $mapperHash) {
+        throw 'Mapper catalog canonicalization changed its identity or signed bytes.'
+    }
+
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory($canonicalPackage, $canonicalZip)
     [System.IO.Compression.ZipFile]::CreateFromDirectory($lowercasePackage, $lowercaseZip)

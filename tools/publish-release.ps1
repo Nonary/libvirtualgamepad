@@ -126,6 +126,9 @@ function Assert-ReleaseSet {
     $lock = Get-Content -LiteralPath (Join-Path $Root $LockName) -Raw | ConvertFrom-Json
     $evidence = Get-Content -LiteralPath (Join-Path $Root $EvidenceName) -Raw | ConvertFrom-Json
     $expectedLayout = @(
+        'mouse_mapper/VibeshineVhfMouseMapper.cat',
+        'mouse_mapper/VibeshineVhfMouseMapper.inf',
+        'mouse_mapper/VibeshineVhfMouseMapper.sys',
         'driver/VibeshineVhfGamepad.cat',
         'driver/VibeshineVhfGamepad.dll',
         'driver/VibeshineVhfGamepad.inf',
@@ -142,11 +145,16 @@ function Assert-ReleaseSet {
         'tools/VibeshineVhfGamepadDeviceSetup.exe'
     )
     $expectedMembershipFiles = @(
+        'mouse_mapper/VibeshineVhfMouseMapper.cat',
+        'mouse_mapper/VibeshineVhfMouseMapper.inf',
+        'mouse_mapper/VibeshineVhfMouseMapper.sys',
         'driver/VibeshineVhfGamepad.cat',
         'driver/VibeshineVhfGamepad.dll',
         'driver/VibeshineVhfGamepad.inf'
     )
 
+    $expectedLayout = @($expectedLayout | Sort-Object)
+    $expectedMembershipFiles = @($expectedMembershipFiles | Sort-Object)
     foreach ($record in @($lock, $evidence)) {
         if ($record.schema_version -ne 1 -or
             $record.tag -cne $ExpectedTag -or
@@ -155,6 +163,12 @@ function Assert-ReleaseSet {
             $record.driver_ver -notmatch '^\d{2}/\d{2}/\d{4},0\.1\.0\.\d+$' -or
             $record.protocol_version -lt 1 -or
             $record.platform -cne 'x64' -or
+            $record.preparation.run_id -notmatch '^[1-9][0-9]*$' -or
+            $record.preparation.unsigned_archive_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $record.preparation.source_revision -cne $ExpectedRevision -or
+            $record.features.mouse_mapper -ne 1 -or
+            $record.mouse_mapper.transport_version -ne 1 -or
+            $record.mouse_mapper.kernel_signing -cne 'windows-kernel-policy' -or
             $record.archive.name -cne $ArchiveName -or
             $record.archive.sha256 -cne $archiveHash -or
             $record.manifest.path -cne 'manifest.json' -or
@@ -178,6 +192,8 @@ function Assert-ReleaseSet {
         throw 'The release lock and evidence record disagree.'
     }
     if (-not $evidence.verification.clean_tagged_head -or
+        -not $evidence.verification.exact_prepared_artifact_reused_without_rebuild -or
+        -not $evidence.verification.mapper_kernel_policy_verified -or
         -not $evidence.verification.infverif_required -or
         -not $evidence.verification.inf2cat_required -or
         -not $evidence.verification.fresh_inf2cat_evidence -or

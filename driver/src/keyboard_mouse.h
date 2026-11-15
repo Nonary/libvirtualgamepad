@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "libvirtualgamepad/keyboard_mouse.h"
+#include "libvirtualgamepad/mouse_transport.h"
 
 namespace lvg::driver {
 // Pure producer core. The caller serializes it under its state lock. It owns no
@@ -36,6 +37,14 @@ class keyboard_mouse_endpoint {
   // submission. Only call from the real readiness boundary, including first read.
   void ready_for_report() noexcept;
   [[nodiscard]] const report *take_report() noexcept;
+  // Only the mapper's validated current-activation ACK may open this gate.
+  // VHF readiness retires bytes, not Mouclass consumption.
+  // Reserve under the state lock, complete the native write without locks,
+  // then commit only after successful completion and activation revalidation.
+  // Reservation deliberately leaves the mouse gate closed during reentrancy.
+  [[nodiscard]] bool reserve_mouse_ack(std::uint32_t sequence) noexcept;
+  [[nodiscard]] bool commit_mouse_ack(std::uint32_t sequence) noexcept;
+  [[nodiscard]] std::uint32_t awaiting_mouse_ack() const noexcept { return awaiting_mouse_ack_; }
   // An uncertain transport/VHF failure never grants a new credit or permits a
   // SendInput replay. The owner must synchronously delete the HID child first.
   void submission_failed() noexcept;
@@ -49,21 +58,25 @@ class keyboard_mouse_endpoint {
   void enqueue(const report &value) noexcept;
   report keyboard_report() const noexcept;
   report consumer_report() const noexcept;
-  report relative_report(std::int16_t x = 0, std::int16_t y = 0, std::int8_t wheel = 0, std::int8_t pan = 0) const noexcept;
+  report mouse_report(std::int32_t x = 0, std::int32_t y = 0,
+    std::int16_t wheel = 0, std::int16_t pan = 0, std::uint16_t flags = 0) noexcept;
   owner_token owner_ {};
   state state_ {state::closed};
   std::uint32_t absolute_generation_ {};
   std::array<std::uint8_t, km::k_keyboard_bytes> keys_ {};
   std::uint8_t buttons_ {};
   std::uint8_t consumer_buttons_ {};
+  std::uint32_t mouse_sequence_ {};
+  std::uint32_t awaiting_mouse_ack_ {};
+  std::uint32_t reserved_mouse_ack_ {};
   std::array<report, queue_capacity> queue_ {};
   std::size_t head_ {}, count_ {};
   report retained_ {};
   bool credit_ {};
 };
 
-// Four top-level collections: keyboard, relative mouse (owns buttons), absolute
-// mouse (movement only), and consumer controls. No other VID/PID is borrowed.
+// Three TLCs: keyboard, owned vendor mouse transport, and consumer controls.
+// The mapper turns the single mouse stream into ordered MOUSE_INPUT_DATA.
 extern const std::uint8_t keyboard_mouse_descriptor[];
 extern const std::size_t keyboard_mouse_descriptor_size;
 } // namespace lvg::driver

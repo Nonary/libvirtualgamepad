@@ -1,0 +1,77 @@
+; Copyright (c) 2026 Chase Payne
+; SPDX-License-Identifier: MIT
+; Packager requires explicitly configured OWNED nonzero $VID$/$PID$. The
+; producer must enumerate keyboard/mouse/consumer in that order (mouse Col02)
+; and VersionNumber 0x0100. Never match a generic usage or zero VID/PID here.
+[Version]
+Signature="$Windows NT$"
+Class=Mouse
+ClassGuid={4d36e96f-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+CatalogFile=VibeshineVhfMouseMapper.cat
+DriverVer=$DRIVER_VER$
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=Models,NT$ARCH$.10.0...19041
+
+[Models.NT$ARCH$.10.0...19041]
+%DeviceName%=Mapper,HID\VID_$VID$&PID_$PID$&REV_0100&Col02
+
+[Mapper.NT]
+CopyFiles=Mapper.CopyFiles
+
+[Mapper.NT.HW]
+AddReg=Mapper.Hardware
+
+[Mapper.Hardware]
+; Device-specific upper filter only. No Mouse-class/global filter changes.
+HKR,,UpperFilters,0x00010000,"mouclass"
+; Read-only readiness interface. No user-mode raw-read/injection surface.
+HKR,,Security,,"D:P(A;;GR;;;SY)(A;;GR;;;BA)(A;;GR;;;LS)"
+
+[Mapper.NT.Services]
+AddService=VibeshineVhfMouseMapper,0x00000002,Mapper.Service
+; Use the inbox class service; preserve every existing service setting.
+AddService=mouclass,0x000000F8,MouseClass.Service
+
+[Mapper.Service]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\VibeshineVhfMouseMapper.sys
+LoadOrderGroup=Pointer Port
+
+[MouseClass.Service]
+DisplayName=%MouseClassName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\mouclass.sys
+LoadOrderGroup=Pointer Class
+
+[Mapper.NT.Wdf]
+KmdfService=VibeshineVhfMouseMapper,Mapper.Wdf
+
+[Mapper.Wdf]
+KmdfLibraryVersion=1.15
+
+[Mapper.CopyFiles]
+VibeshineVhfMouseMapper.sys
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+VibeshineVhfMouseMapper.sys=1
+
+[Strings]
+Provider="Vibeshine"
+DeviceName="Vibeshine Ordered Virtual Mouse"
+ServiceName="Vibeshine VHF Ordered Mouse Mapper"
+MouseClassName="Mouse Class Driver"
+DiskName="Vibeshine Ordered Mouse Driver"

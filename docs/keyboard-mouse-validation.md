@@ -111,3 +111,46 @@ The successful local package was `build/km-isolated-package27`, manifest SHA-256
 This validates one Windows configuration and the host adapter, not a full
 Moonlight streaming session, production driver signing/release, suspend/resume,
 Driver Verifier, or the outstanding VhfUm callback-rundown qualification.
+
+## Ordered mouse transport source validation (2026-11-14)
+
+The new producer replaces both Mouhid mouse collections with a single vendor
+transport (`ff53/1`, report 2) consumed by the owned mapper. This invalidates any
+assumption that the October native qualification applies to the new mapper.
+The new shared wire preserves the full virtual-desktop coordinate domain,
+button snapshots and wheel magnitudes. Its sequence identifies producer
+admission order, not Windows desktop delivery.
+
+Executed on Linux against the changed source:
+
+- All 15 portable driver CTests passed after producer/native-helper/ACK integration.
+- Producer core: 745 checks, zero failures. The descriptor parser confirms one
+  vendor mouse TLC and no standard mouse TLC; report tests cover ordered button,
+  relative and absolute snapshots, both coordinate extrema, wheel units,
+  duplicate/noop admission, full-queue rejection, retained storage, neutral close
+  with explicitly marked sequence gaps, strict-neutral marker validation, and
+  lifecycle reset.
+- Actual driver/client-body fixture: 4,191 checks, zero failures. Query tests
+  cover ordered capability/generation consistency, optional consumer support,
+  legacy query compatibility and mixed-capability refusal. A missing-mapper
+  boundary makes open fail after synchronous child deletion, with no report
+  submissions. The fixture verifies revision `0x0100`.
+- ACK tests verify the vendor output descriptor and exact ID/version/size/
+  reserved/sequence checks; duplicate, future, stale-generation, D0 and retired
+  callbacks cannot release the mouse gate. VHF readiness and keyboard-retained
+  byte replacement cannot release it either. Close waits for the previous and
+  neutral mouse ACKs. Inline ACK/read callbacks retain single-pump behavior;
+  ACK reservation keeps the gate closed through reentrant readiness until
+  successful native completion. Combined completion-failure/reentry and
+  concurrent readiness/duplicate-ACK reservation tests pass. Uncertain ACK
+  completion faults without replay; concurrent teardown drains
+  the admitted ACK callback before reclaiming its context.
+- Focused producer core, actual driver/client transport and power CTests also
+  passed ASan+UBSan (`detect_leaks=0`).
+- `git diff --check` passed.
+
+The mapper readiness API is stubbed at its OS boundary in the actual driver
+fixture. These results do not qualify native mapper binding, HID reads,
+Mouclass partial consumption, multi-monitor cursor behavior, desktop switches,
+D0/removal, signed package deployment or VhfUm callback rundown. Those require
+Windows build/runtime evidence for the new package.

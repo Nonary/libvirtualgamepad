@@ -259,14 +259,21 @@ DWORD client::query_keyboard_mouse(km::query_response *const response) noexcept 
   const DWORD status = issue(km::ioctl_query, &request, sizeof(request),
     &received, sizeof(received), &bytes);
   if (status != ERROR_SUCCESS) return status;
+  constexpr auto known = km::k_required_capabilities | km::primary_absolute_mouse |
+    km::consumer | km::ordered_mouse | km::virtual_desktop_absolute;
+  const bool ordered = (received.capabilities & (km::ordered_mouse | km::virtual_desktop_absolute)) != 0;
+  const bool valid_mouse = ordered ?
+    ((received.capabilities & km::k_ordered_required_capabilities) == km::k_ordered_required_capabilities &&
+     (received.capabilities & (km::relative_mouse | km::wheel_detents |
+       km::bound_absolute_mouse | km::primary_absolute_mouse)) == 0 &&
+     received.absolute_target_generation == km::k_virtual_desktop_absolute_generation) :
+    ((received.capabilities & km::k_relative_capabilities) == km::k_relative_capabilities &&
+     ((received.capabilities & km::primary_absolute_mouse) == 0 ||
+      (received.capabilities & km::bound_absolute_mouse) != 0) &&
+     (((received.capabilities & km::bound_absolute_mouse) != 0) ==
+      (received.absolute_target_generation != 0)));
   if (bytes != sizeof(received) || !km::valid(received) || received.reserved != 0 ||
-      (received.capabilities & ~(km::k_required_capabilities | km::primary_absolute_mouse | km::consumer)) != 0 ||
-      (received.capabilities & km::k_relative_capabilities) != km::k_relative_capabilities ||
-      received.queue_capacity < 2 ||
-      ((received.capabilities & km::primary_absolute_mouse) != 0 &&
-       (received.capabilities & km::bound_absolute_mouse) == 0) ||
-      (((received.capabilities & km::bound_absolute_mouse) != 0) !=
-       (received.absolute_target_generation != 0))) {
+      (received.capabilities & ~known) != 0 || !valid_mouse || received.queue_capacity < 2) {
     return ERROR_INVALID_DATA;
   }
   *response = received;

@@ -25,6 +25,11 @@ jobs:
         run: python3 driver/tests/test_sc26_feedback_counters.py
       - name: Test production Steam Controller attribute pass-through under ASan/UBSan
         run: python3 driver/tests/test_sc26_attributes.py
+      - name: Test ordered mouse conversion and backpressure
+        run: |
+          cmake -S driver/mouse_mapper -B /tmp/vhf-mapper-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/vhf-mapper-tests --parallel 2
+          ctest --test-dir /tmp/vhf-mapper-tests --output-on-failure --no-tests=error
       - name: Test the capture decoders on degenerate captures
         run: python3 tools/capture/test_sc26_decoders.py
 
@@ -41,6 +46,8 @@ jobs:
           persist-credentials: false
       - name: Test the capture script's inline Ctrl+C helper
         run: ./tools/tests/test-capture-helper.ps1
+      - name: Test mapper package evidence and signed-catalog import contracts
+        run: ./tools/tests/test-mouse-mapper-package.ps1
       - name: Run Windows driver and input contract tests
         run: |
           $testBuild = Join-Path $env:RUNNER_TEMP 'vhf-contract-tests'
@@ -51,13 +58,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Contract test build failed.' }
           ctest --test-dir $testBuild -C Debug --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { throw 'Contract tests failed.' }
+      - name: Test mapper core with MSVC assertions enabled
+        run: |
+          $mapperBuild = Join-Path $env:RUNNER_TEMP 'vhf-mapper-core-tests'
+          cmake -S driver/mouse_mapper -B $mapperBuild -G 'Visual Studio 17 2022' -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Mapper core configuration failed.' }
+          cmake --build $mapperBuild --config Debug --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Mapper core build failed.' }
+          ctest --test-dir $mapperBuild -C Debug --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'Mapper core tests failed.' }
       - name: Build and verify the unsigned driver package with the WDK
+        env:
+          VHF_MOUSE_VENDOR_ID: ${{ vars.VHF_MOUSE_VENDOR_ID }}
+          VHF_MOUSE_PRODUCT_ID: ${{ vars.VHF_MOUSE_PRODUCT_ID }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if (-not $env:VHF_MOUSE_VENDOR_ID -or -not $env:VHF_MOUSE_PRODUCT_ID) { throw 'Configure product-owned VHF_MOUSE_VENDOR_ID and VHF_MOUSE_PRODUCT_ID repository variables before building the mapper.' }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $instance = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($instance)) { throw 'No MSBuild instance found.' }
           $msbuild = Join-Path $instance.Trim() 'MSBuild/Current/Bin/MSBuild.exe'
+          ./tools/tests/test-mouse-identity.ps1 -MSBuildPath $msbuild
           $date = (git log -1 --format=%cd --date=format:%m/%d/%Y).Trim()
           $revision = (git rev-list --count HEAD).Trim()
           $source = (git rev-parse HEAD).Trim()
@@ -66,6 +87,7 @@ jobs:
           $evidence = Join-Path $env:RUNNER_TEMP 'vhf-pr-catalog.json'
           ./tools/build-driver.ps1 -Configuration Release -Platform x64 -DriverVer $driverVer `
             -PackageDir $package -SigningMode Release -MSBuildPath $msbuild `
+            -KeyboardMouseVendorId ([uint16]$env:VHF_MOUSE_VENDOR_ID) -KeyboardMouseProductId ([uint16]$env:VHF_MOUSE_PRODUCT_ID) `
             -CatalogGenerationEvidencePath $evidence
           ./tools/verify-driver-package.ps1 -PackageDir $package -Platform x64 `
             -DriverVer $driverVer -SourceRevision $source -UnsignedForMsiSigning `

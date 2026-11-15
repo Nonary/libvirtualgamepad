@@ -26,6 +26,9 @@
 #include <type_traits>
 
 #include "keyboard_mouse_native.h"
+#if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
+#include "ordered_mouse_binding.h"
+#endif
 
 #include "libvirtualgamepad/protocol.h"
 #include "dualsense.h"
@@ -377,6 +380,7 @@ void unlock_lifetime(device_context *const context) noexcept {
 
 #if LVG_ENABLE_KEYBOARD_MOUSE_SOURCE
 [[nodiscard]] bool previous_instance_present(const wchar_t *instance_id) noexcept;
+#include "ordered_mouse_binding.inc"
 #include "keyboard_mouse_native.inc"
 #endif
 

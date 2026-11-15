@@ -11,6 +11,10 @@ param(
 
     [string] $PackageDir,
 
+    # Supply only nonzero IDs allocated to this product; no default is assumed.
+    [uint16] $KeyboardMouseVendorId = 0,
+    [uint16] $KeyboardMouseProductId = 0,
+
     [ValidateSet('LocalTest', 'Release')]
     [string] $SigningMode = 'LocalTest',
 
@@ -26,6 +30,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($KeyboardMouseVendorId -eq 0 -or $KeyboardMouseProductId -eq 0) {
+    throw 'The ordered mouse mapper requires explicit nonzero product-owned -KeyboardMouseVendorId and -KeyboardMouseProductId. No production identity is allocated by this script.'
+}
+
 
 function Resolve-DriverVer {
     param(
@@ -174,6 +182,7 @@ function Get-DriverProjectOverrides {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $driverProject = Join-Path $repoRoot 'driver/VibeshineVhfGamepad.vcxproj'
+$mapperProject = Join-Path $repoRoot 'driver/mouse_mapper/VibeshineVhfMouseMapper.vcxproj'
 $deviceSetupProject = Join-Path $repoRoot 'tools/device_setup/VibeshineVhfGamepadDeviceSetup.vcxproj'
 $driverVer = Resolve-DriverVer -ExplicitDriverVer $DriverVer -RepositoryRoot $repoRoot
 $msbuild = Resolve-MSBuild -ExplicitPath $MSBuildPath
@@ -186,15 +195,16 @@ if ([string]::IsNullOrWhiteSpace($PackageDir)) {
 $kitVersion = '10.0.26100.0'
 $driverOverrides = Get-DriverProjectOverrides -MSBuildPath $msbuild -Platform $Platform -KitVersion $kitVersion
 
-foreach ($project in @($driverProject, $deviceSetupProject)) {
+foreach ($project in @($driverProject, $mapperProject, $deviceSetupProject)) {
     if (-not (Test-Path -LiteralPath $project -PathType Leaf)) {
         throw "Build project is missing: $project"
     }
-    # Only the UMDF driver project goes through the WDK toolset, so only it
+    # Both driver projects go through WDK toolsets, so each
     # needs the host-compatibility overrides.
     $projectArguments = @($project, '/t:Build', "/p:Configuration=$Configuration", "/p:Platform=$Platform", '/m')
-    if ($project -eq $driverProject) {
+    if ($project -ne $deviceSetupProject) {
         $projectArguments += $driverOverrides
+        $projectArguments += @("/p:LvgKeyboardMouseVendorId=$KeyboardMouseVendorId", "/p:LvgKeyboardMouseProductId=$KeyboardMouseProductId")
     }
     & $msbuild @projectArguments
     if ($LASTEXITCODE -ne 0) {
@@ -202,6 +212,8 @@ foreach ($project in @($driverProject, $deviceSetupProject)) {
     }
 }
 
+$mapper = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfMouseMapper.sys"
+if (-not (Test-Path -LiteralPath $mapper -PathType Leaf)) { throw "Mouse mapper SYS is missing: $mapper" }
 $driver = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepad.dll"
 $deviceSetup = Join-Path $repoRoot "build/$Platform/$Configuration/VibeshineVhfGamepadDeviceSetup.exe"
 if (-not (Test-Path -LiteralPath $driver -PathType Leaf)) {
@@ -218,6 +230,8 @@ $prepareParameters = @{
     OutputDir = $PackageDir
     Configuration = $Configuration
     SigningMode = $SigningMode
+    KeyboardMouseVendorId = $KeyboardMouseVendorId
+    KeyboardMouseProductId = $KeyboardMouseProductId
 }
 if (-not [string]::IsNullOrWhiteSpace($InfVerifPath)) {
     $prepareParameters.InfVerifPath = $InfVerifPath

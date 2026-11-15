@@ -183,3 +183,12 @@ if(NOT WIN32)
     target_include_directories(test_playstation_touch PRIVATE support/vhf)
 endif()
 add_test(NAME playstation_touch_contract COMMAND test_playstation_touch)
+
+# The actual CM discovery and mapper status admission body, with inert API
+# boundaries: rejects foreign containers, wrong identity, malformed ABI and
+# incomplete/late PnP readiness before the source can acknowledge OPEN.
+add_executable(test_ordered_mouse_binding test_ordered_mouse_binding.cpp)
+target_compile_features(test_ordered_mouse_binding PRIVATE cxx_std_20)
+target_include_directories(test_ordered_mouse_binding PRIVATE ../../include)
+add_test(NAME ordered_mouse_mapper_binding COMMAND test_ordered_mouse_binding)
+set_tests_properties(ordered_mouse_mapper_binding PROPERTIES TIMEOUT 10)

@@ -24,8 +24,15 @@ enum capability : std::uint32_t {
   // virtual desktop. Hosts must transform from their desktop coordinate space.
   primary_absolute_mouse = 1u << 4,
   consumer = 1u << 5,
+  // All mouse events use one vendor HID stream and the owned kernel mapper.
+  ordered_mouse = 1u << 6,
+  virtual_desktop_absolute = 1u << 7,
 };
 inline constexpr std::uint32_t k_required_capabilities = keyboard | relative_mouse | wheel_detents | bound_absolute_mouse;
+inline constexpr std::uint32_t k_ordered_required_capabilities =
+  keyboard | ordered_mouse | virtual_desktop_absolute;
+inline constexpr std::uint32_t k_ordered_capabilities = k_ordered_required_capabilities | consumer;
+inline constexpr std::uint32_t k_virtual_desktop_absolute_generation = 2;
 
 #pragma pack(push, 1)
 struct header {
