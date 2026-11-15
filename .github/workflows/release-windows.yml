@@ -4,31 +4,9 @@ on:
   push:
     tags:
       - 'v0.1.0-beta.*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Exact previously prepared release tag'
-        required: true
-        type: string
-      prepare_run_id:
-        description: 'Successful tag-triggered prepare run ID (same repository)'
-        required: true
-        type: string
-      unsigned_archive_sha256:
-        description: 'Exact unsigned ZIP SHA-256 printed by that prepare run'
-        required: true
-        type: string
-      signed_mapper_catalog_url:
-        description: 'HTTPS URL of Microsoft CAT returned for that exact unsigned submission'
-        required: true
-        type: string
-
-permissions:
-  contents: read
-  actions: read
 
 concurrency:
-  group: release-windows-${{ inputs.tag || github.ref_name }}
+  group: release-windows-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -36,25 +14,35 @@ defaults:
     shell: pwsh
 
 jobs:
-  prepare:
-    if: github.event_name == 'push'
+  build:
     runs-on: windows-2022
+    permissions:
+      contents: read
     steps:
-      - name: Check out exact tagged source for preparation
+      - name: Check out the tagged source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate the preparation tag
+
+      - name: Validate the tag checkout
         run: |
-          if ($env:GITHUB_REF_TYPE -cne 'tag' -or $env:GITHUB_REF_NAME -notmatch '^v0\.1\.0-beta\.[1-9][0-9]*$') { throw 'Unsupported preparation tag.' }
+          if ($env:GITHUB_REF_TYPE -cne 'tag' -or
+              $env:GITHUB_REF_NAME -notmatch '^v0\.1\.0-beta\.[1-9][0-9]*$') {
+            throw "Unsupported release ref '$env:GITHUB_REF'."
+          }
           $head = (git rev-parse HEAD).Trim()
           $target = (git rev-parse "refs/tags/$env:GITHUB_REF_NAME`^{commit}").Trim()
-          if ($LASTEXITCODE -ne 0 -or $head -cne $target -or $head -cne $env:GITHUB_SHA) { throw 'Preparation tag, checkout and event SHA differ.' }
-      - name: Validate package fixtures
-        run: |
-          ./tools/tests/test-release-package-case.ps1
-          ./tools/tests/test-mouse-mapper-package.ps1
+          if ($LASTEXITCODE -ne 0 -or $head -cne $target -or $head -cne $env:GITHUB_SHA) {
+            throw "Tag, checkout, and workflow SHA do not resolve to the same commit."
+          }
+
+      - name: Validate case-sensitive release layout
+        run: ./tools/tests/test-release-package-case.ps1
+
+      - name: Validate unsigned mapper package contracts
+        run: ./tools/tests/test-mouse-mapper-package.ps1
+
       - name: Resolve hosted MSBuild
         id: msbuild
         run: |
@@ -94,117 +82,48 @@ jobs:
           Write-Output "MSBuild: $msbuildPath ($msbuildVersion)"
           "path=$msbuildPath" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Build exact unsigned package once for Microsoft submission
+      - name: Build and verify the producer package
         env:
           MSBUILD_PATH: ${{ steps.msbuild.outputs.path }}
-          VHF_MOUSE_VENDOR_ID: ${{ vars.VHF_MOUSE_VENDOR_ID }}
-          VHF_MOUSE_PRODUCT_ID: ${{ vars.VHF_MOUSE_PRODUCT_ID }}
         run: |
-          if (-not $env:VHF_MOUSE_VENDOR_ID -or -not $env:VHF_MOUSE_PRODUCT_ID) { throw 'Configure product-owned VHF_MOUSE_VENDOR_ID and VHF_MOUSE_PRODUCT_ID repository variables.' }
-          ./tools/tests/test-mouse-identity.ps1 -MSBuildPath $env:MSBUILD_PATH
-          ./tools/build-release-package.ps1 -Stage Prepare -Tag $env:GITHUB_REF_NAME `
-            -PreparationRunId $env:GITHUB_RUN_ID -OutputDir ./artifacts/unsigned-preparation `
-            -MSBuildPath $env:MSBUILD_PATH -KeyboardMouseVendorId ([uint16]$env:VHF_MOUSE_VENDOR_ID) `
-            -KeyboardMouseProductId ([uint16]$env:VHF_MOUSE_PRODUCT_ID)
-      - name: Expose immutable unsigned submission and its explicit hash
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: unsigned-windows-${{ github.ref_name }}-${{ github.run_id }}
-          path: artifacts/unsigned-preparation/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 90
+          ./tools/build-release-package.ps1 `
+            -Tag $env:GITHUB_REF_NAME `
+            -OutputDir ./artifacts/release `
+            -MSBuildPath $env:MSBUILD_PATH
 
-  resume:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-2022
-    outputs:
-      source_revision: ${{ steps.validate.outputs.source }}
-    steps:
-      - name: Check out the exact prepared tag
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Authenticate the source preparation run
-        id: validate
-        env:
-          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
-          PREPARED_TAG: ${{ inputs.tag }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ($env:PREPARE_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:PREPARED_TAG -notmatch '^v0\.1\.0-beta\.[1-9][0-9]*$') { throw 'Invalid preparation run/tag.' }
-          $head = (git rev-parse HEAD).Trim()
-          $target = (git rev-parse "refs/tags/$env:PREPARED_TAG`^{commit}").Trim()
-          if ($LASTEXITCODE -ne 0 -or $head -cne $target) { throw 'Resume checkout is not the prepared tag.' }
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
-          $run = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:PREPARE_RUN_ID"
-          if ($run.repository.full_name -cne $env:GITHUB_REPOSITORY -or $run.head_sha -cne $head -or
-              $run.path -cne '.github/workflows/release-windows.yml' -or $run.event -cne 'push' -or
-              $run.status -cne 'completed' -or $run.conclusion -cne 'success') { throw 'Unsigned artifact is not from a successful exact-source tag preparation in this workflow/repository.' }
-          "source=$head" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
-      - name: Download only the selected immutable preparation artifact
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        with:
-          name: unsigned-windows-${{ inputs.tag }}-${{ inputs.prepare_run_id }}
-          run-id: ${{ inputs.prepare_run_id }}
-          github-token: ${{ github.token }}
-          path: prepared-artifact
-      - name: Import returned Microsoft CAT into the exact preserved unsigned bytes
-        env:
-          PREPARED_TAG: ${{ inputs.tag }}
-          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
-          UNSIGNED_ARCHIVE_SHA256: ${{ inputs.unsigned_archive_sha256 }}
-          KERNEL_CATALOG_URL: ${{ inputs.signed_mapper_catalog_url }}
-          VHF_MOUSE_VENDOR_ID: ${{ vars.VHF_MOUSE_VENDOR_ID }}
-          VHF_MOUSE_PRODUCT_ID: ${{ vars.VHF_MOUSE_PRODUCT_ID }}
-        run: |
-          if (-not $env:VHF_MOUSE_VENDOR_ID -or -not $env:VHF_MOUSE_PRODUCT_ID) { throw 'Original owned identity variables are required on resume.' }
-          $version = $env:PREPARED_TAG.Substring(1)
-          $archive = Join-Path $PWD "prepared-artifact/libvirtualgamepad-$version-unsigned-run-$env:PREPARE_RUN_ID.zip"
-          if ($env:UNSIGNED_ARCHIVE_SHA256 -notmatch '^[0-9a-fA-F]{64}$' -or
-              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $env:UNSIGNED_ARCHIVE_SHA256) { throw 'Prepared archive does not match the explicitly supplied original SHA-256.' }
-          if ([Uri]::new($env:KERNEL_CATALOG_URL).Scheme -cne 'https') { throw 'Microsoft CAT download requires HTTPS.' }
-          $catalog = Join-Path $env:RUNNER_TEMP 'VibeshineVhfMouseMapper.cat'
-          Invoke-WebRequest -Uri $env:KERNEL_CATALOG_URL -OutFile $catalog
-          # Resume has no MSBuild/Inf2Cat path: original hashes, tag/source,
-          # DriverVer, identities and run ID are checked before /kp membership.
-          ./tools/build-release-package.ps1 -Stage Resume -Tag $env:PREPARED_TAG `
-            -PreparationRunId $env:PREPARE_RUN_ID -PreparedArchivePath $archive `
-            -ExpectedPreparedArchiveSha256 $env:UNSIGNED_ARCHIVE_SHA256 -KernelSignedMapperCatalog $catalog `
-            -KeyboardMouseVendorId ([uint16]$env:VHF_MOUSE_VENDOR_ID) `
-            -KeyboardMouseProductId ([uint16]$env:VHF_MOUSE_PRODUCT_ID) -OutputDir ./artifacts/release
-      - name: Upload verified release set from preserved submission bytes
+      - name: Upload the verified release set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: windows-release-${{ inputs.tag }}
+          name: windows-release-${{ github.ref_name }}
           path: artifacts/release/*
           if-no-files-found: error
           compression-level: 0
 
   publish:
-    if: github.event_name == 'workflow_dispatch'
-    needs: resume
+    needs: build
     runs-on: windows-2022
     permissions:
       contents: write
-      actions: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Check out the tagged publication code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: ${{ inputs.tag }}
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+
+      - name: Download the verified release set
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: windows-release-${{ inputs.tag }}
+          name: windows-release-${{ github.ref_name }}
           path: release
-      - name: Publish only the resumed verified release
+
+      - name: Publish through a fail-closed API transaction
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PREPARED_TAG: ${{ inputs.tag }}
-          SOURCE_REVISION: ${{ needs.resume.outputs.source_revision }}
         run: |
-          ./tools/publish-release.ps1 -ReleaseDir ./release -Tag $env:PREPARED_TAG `
-            -Repository $env:GITHUB_REPOSITORY -SourceRevision $env:SOURCE_REVISION -Token $env:GITHUB_TOKEN
+          ./tools/publish-release.ps1 `
+            -ReleaseDir ./release `
+            -Tag $env:GITHUB_REF_NAME `
+            -Repository $env:GITHUB_REPOSITORY `
+            -SourceRevision $env:GITHUB_SHA `
+            -Token $env:GITHUB_TOKEN

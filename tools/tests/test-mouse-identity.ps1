@@ -23,9 +23,18 @@ try {
     Check-Identity '43981' '22136' $true 43981 22136
     Check-Identity '0xABCD' '0x5678' $true 43981 22136
     Check-Identity '00001' '00002' $true
-    foreach ($invalid in @('', '0', '0x0', '0X0000', '65536', '0x10000', '-1', 'unallocated')) {
+    Check-Identity '65535' '65535' $true 65535 65535
+    Check-Identity '0xFFFF' '0Xffff' $true 65535 65535
+    foreach ($zero in @('0', '00', '00000', '0x0', '0X0000')) {
+        Check-Identity $zero $zero $true 0 0
+        Check-Identity $zero '2' $true 0 2
+        Check-Identity '1' $zero $true 1 0
+    }
+    foreach ($invalid in @('65536', '99999', '0x10000', '-1', '+1', '1.0', 'unallocated')) {
         Check-Identity $invalid '2' $false
         Check-Identity '1' $invalid $false
     }
-    Write-Output 'Shared MSBuild identity guard passed: decimal/hex normalization, zero/hex-zero/missing/out-of-range rejection for both projects. No driver was compiled.'
+    $output = @(& $MSBuildPath $project '/nologo' '/v:minimal' '/p:ExpectedVendorId=0' '/p:ExpectedProductId=0' 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Default zero identity failed: $($output -join [Environment]::NewLine)" }
+    Write-Output 'Shared MSBuild identity guard passed: default/explicit zero, decimal/hex normalization and 16-bit bounds for both projects. No driver was compiled.'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

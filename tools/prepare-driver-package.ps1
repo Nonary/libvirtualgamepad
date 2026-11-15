@@ -36,9 +36,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($KeyboardMouseVendorId -eq 0 -or $KeyboardMouseProductId -eq 0) {
-    throw 'The ordered mouse mapper requires explicit nonzero product-owned -KeyboardMouseVendorId and -KeyboardMouseProductId. No production identity is allocated by this script.'
-}
 
 
 function Resolve-SdkTool {

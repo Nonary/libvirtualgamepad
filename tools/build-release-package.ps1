@@ -4,30 +4,17 @@ param(
     [ValidatePattern('^v0\.1\.0-beta\.[1-9][0-9]*$')]
     [string] $Tag,
 
-    [ValidateSet('Prepare', 'Resume')][string] $Stage = 'Prepare',
     [string] $OutputDir,
-    [Parameter(Mandatory = $true)][ValidatePattern('^[1-9][0-9]*$')][string] $PreparationRunId,
-    [string] $PreparedArchivePath,
-    [ValidatePattern('^[0-9a-fA-F]{64}$')][string] $ExpectedPreparedArchiveSha256,
     [string] $MSBuildPath,
     [string] $InfVerifPath,
     [string] $Inf2CatPath,
     [string] $SignToolPath,
-    [string] $KernelSignedMapperCatalog,
     [uint16] $KeyboardMouseVendorId = 0,
     [uint16] $KeyboardMouseProductId = 0
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'release-preparation.ps1')
-if ($Stage -ceq 'Resume' -and ([string]::IsNullOrWhiteSpace($PreparedArchivePath) -or [string]::IsNullOrWhiteSpace($ExpectedPreparedArchiveSha256) -or [string]::IsNullOrWhiteSpace($KernelSignedMapperCatalog))) {
-    throw 'Resume requires the exact prepared archive, its explicit SHA-256, original preparation run ID, and the returned Microsoft mapper catalog.'
-}
-if ($KeyboardMouseVendorId -eq 0 -or $KeyboardMouseProductId -eq 0) {
-    throw 'The ordered mouse mapper requires explicit nonzero product-owned -KeyboardMouseVendorId and -KeyboardMouseProductId. No production identity is allocated by this script.'
-}
-
 
 function Invoke-Git {
     param(
@@ -111,7 +98,7 @@ $lockName = "$assetBase.release-lock.json"
 $evidenceName = "$assetBase-evidence.json"
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $OutputDir = Join-Path $RepoRoot $(if ($Stage -ceq 'Prepare') { 'artifacts/unsigned-preparation' } else { 'artifacts/release' })
+    $OutputDir = Join-Path $RepoRoot 'artifacts/release'
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 if (Test-Path -LiteralPath $OutputDir) {
@@ -131,12 +118,6 @@ if (-not [int]::TryParse($revisionText, [ref] $revision) -or $revision -gt 65535
 }
 $driverVer = "$commitDate,0.1.0.$revision"
 $protocolVersion = Get-ProtocolVersion -HeaderPath (Join-Path $RepoRoot 'include/libvirtualgamepad/protocol.h')
-
-$preparationMetadata = [ordered]@{
-    tag = $Tag; tag_target = $tagTarget.ToLowerInvariant(); source_revision = $head.ToLowerInvariant()
-    driver_ver = $driverVer; protocol_version = $protocolVersion; platform = 'x64'
-    vendor_id = $KeyboardMouseVendorId; product_id = $KeyboardMouseProductId; preparation_run_id = $PreparationRunId
-}
 
 $expectedPayload = @(
     'mouse_mapper/VibeshineVhfMouseMapper.cat',
@@ -162,10 +143,16 @@ $signedDownstream = @(
     'tools/VibeshineVhfGamepadDeviceSetup.exe'
 )
 $unsignedPayloads = @(
+    'mouse_mapper/VibeshineVhfMouseMapper.cat',
+    'mouse_mapper/VibeshineVhfMouseMapper.sys',
     'driver/VibeshineVhfGamepad.cat',
     'driver/VibeshineVhfGamepad.dll',
     'tools/VibeshineVhfGamepadDeviceSetup.exe'
 )
+
+$expectedPayload = @($expectedPayload | Sort-Object)
+$expectedManifestFiles = @($expectedManifestFiles | Sort-Object)
+$unsignedPayloads = @($unsignedPayloads | Sort-Object)
 
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("libvirtualgamepad-release-" + [guid]::NewGuid().ToString('N'))
 $packageDir = Join-Path $workRoot 'package'
@@ -173,11 +160,6 @@ $catalogGenerationEvidencePath = Join-Path $workRoot 'catalog-generation.json'
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
 try {
-    if ($Stage -ceq 'Prepare') {
-    $stateRoot = Join-Path $workRoot 'unsigned-state'
-    $packageDir = Join-Path $stateRoot 'package'
-    $catalogGenerationEvidencePath = Join-Path $stateRoot 'catalog-generation.json'
-    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     $buildParameters = @{
         Configuration = 'Release'
         Platform = 'x64'
@@ -197,31 +179,6 @@ try {
 
     & (Join-Path $PSScriptRoot 'build-driver.ps1') @buildParameters
 
-    & (Join-Path $PSScriptRoot 'verify-driver-package.ps1') -PackageDir $packageDir -Platform x64 -DriverVer $driverVer `
-        -SourceRevision $head -ProtocolVersion $protocolVersion -CatalogGenerationEvidencePath $catalogGenerationEvidencePath -UnsignedForMsiSigning
-    Write-UnsignedReleasePreparation -Root $stateRoot -Metadata $preparationMetadata
-    $null = Assert-UnsignedReleasePreparation -Root $stateRoot -ExpectedMetadata $preparationMetadata
-    $unsignedName = "libvirtualgamepad-$version-unsigned-run-$PreparationRunId.zip"
-    $unsignedPath = Join-Path $OutputDir $unsignedName
-    $unsignedHash = Export-UnsignedReleasePreparation -Root $stateRoot -ArchivePath $unsignedPath
-    "$unsignedHash  $unsignedName`n" | Set-Content -LiteralPath "$unsignedPath.sha256" -NoNewline -Encoding ascii
-    Write-Output "Prepared exact unsigned submission archive: $unsignedPath"
-    Write-Output "Unsigned archive SHA-256: $unsignedHash"
-    Write-Output 'Submit package/mouse_mapper from this archive for Microsoft signing; resume with this exact archive/hash/run ID and returned CAT. Resume does not rebuild.'
-    return
-    }
-
-    $stateRoot = Join-Path $workRoot 'imported-unsigned-state'
-    $preparation = Import-UnsignedReleasePreparation -ArchivePath $PreparedArchivePath -ExpectedArchiveSha256 $ExpectedPreparedArchiveSha256 `
-        -Root $stateRoot -ExpectedMetadata $preparationMetadata
-    # Work on a copy. No compiler or Inf2Cat invocation occurs in Resume.
-    Copy-Item -LiteralPath (Join-Path $stateRoot 'package') -Destination $packageDir -Recurse
-    $originalGenerationEvidence = Get-Content -LiteralPath (Join-Path $stateRoot 'catalog-generation.json') -Raw | ConvertFrom-Json
-    # The artifact hash authenticates the original evidence. Only its absolute
-    # scratch-directory locator changes after moving the same immutable bytes.
-    $originalGenerationEvidence.package_dir = $packageDir
-    $originalGenerationEvidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $catalogGenerationEvidencePath -NoNewline -Encoding utf8
-
     $verifyParameters = @{
         PackageDir = $packageDir
         Platform = 'x64'
@@ -230,8 +187,6 @@ try {
         ProtocolVersion = $protocolVersion
         CatalogGenerationEvidencePath = $catalogGenerationEvidencePath
         UnsignedForMsiSigning = $true
-        RequireKernelSigning = $true
-        KernelSignedMapperCatalog = $KernelSignedMapperCatalog
     }
     if (-not [string]::IsNullOrWhiteSpace($SignToolPath)) {
         $verifyParameters.SignToolPath = $SignToolPath
@@ -239,7 +194,7 @@ try {
     & (Join-Path $PSScriptRoot 'verify-driver-package.ps1') @verifyParameters
 
     $actualPayload = Get-RelativeFiles -Root $packageDir
-    Assert-ExactList -Actual $actualPayload -Expected @($expectedPayload | Sort-Object) -Name 'Package layout'
+    Assert-ExactList -Actual $actualPayload -Expected $expectedPayload -Name 'Package layout'
     if (@(Get-ChildItem -LiteralPath $packageDir -Recurse -Filter '*.cer' -File).Count -ne 0) {
         throw 'Release packages must not contain a certificate.'
     }
@@ -251,7 +206,11 @@ try {
         $manifest.driver_ver -cne $driverVer -or
         $manifest.platform -cne 'x64' -or
         $manifest.protocol_version -ne $protocolVersion -or
-        $manifest.signing.channel -cne 'msi-request-signing') {
+        $manifest.signing.channel -cne 'msi-request-signing' -or
+        $manifest.features.mouse_mapper -ne 1 -or
+        $manifest.mouse_mapper.kernel_signing -cne 'unsigned-producer' -or
+        $manifest.mouse_mapper.vendor_id -ne $KeyboardMouseVendorId -or
+        $manifest.mouse_mapper.product_id -ne $KeyboardMouseProductId) {
         throw 'manifest.json metadata does not match the tagged source and release contract.'
     }
     Assert-ExactList -Actual @($manifest.signing.signed_downstream) -Expected $signedDownstream -Name 'Manifest signed_downstream'
@@ -261,18 +220,19 @@ try {
         throw 'manifest.json does not record fresh Inf2Cat catalog membership evidence.'
     }
     $expectedMembershipFiles = @(
-        'mouse_mapper/VibeshineVhfMouseMapper.cat',
-        'mouse_mapper/VibeshineVhfMouseMapper.inf',
-        'mouse_mapper/VibeshineVhfMouseMapper.sys',
+    'mouse_mapper/VibeshineVhfMouseMapper.cat',
+    'mouse_mapper/VibeshineVhfMouseMapper.inf',
+    'mouse_mapper/VibeshineVhfMouseMapper.sys',
         'driver/VibeshineVhfGamepad.cat',
         'driver/VibeshineVhfGamepad.dll',
         'driver/VibeshineVhfGamepad.inf'
     )
+    $expectedMembershipFiles = @($expectedMembershipFiles | Sort-Object)
     $membershipFileNames = @($manifest.signing.catalog_membership.files.PSObject.Properties.Name | Sort-Object)
-    Assert-ExactList -Actual $membershipFileNames -Expected @($expectedMembershipFiles | Sort-Object) -Name 'Catalog membership file list'
+    Assert-ExactList -Actual $membershipFileNames -Expected $expectedMembershipFiles -Name 'Catalog membership file list'
 
     $manifestFiles = @($manifest.files | ForEach-Object { [string] $_.path } | Sort-Object)
-    Assert-ExactList -Actual $manifestFiles -Expected @($expectedManifestFiles | Sort-Object) -Name 'Manifest file list'
+    Assert-ExactList -Actual $manifestFiles -Expected $expectedManifestFiles -Name 'Manifest file list'
     foreach ($file in $manifest.files) {
         $payloadPath = Join-Path $packageDir ([string] $file.path)
         $actualHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -303,7 +263,7 @@ try {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
         $archiveLayout = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } | Sort-Object)
-        Assert-ExactList -Actual $archiveLayout -Expected @($expectedPayload | Sort-Object) -Name 'Archive layout'
+        Assert-ExactList -Actual $archiveLayout -Expected $expectedPayload -Name 'Archive layout'
         $archivedManifest = $zip.GetEntry('manifest.json')
         if ($null -eq $archivedManifest) {
             throw 'The release archive is missing manifest.json.'
@@ -345,10 +305,9 @@ try {
             path = 'manifest.json'
             sha256 = $manifestHash
         }
-        preparation = [ordered]@{ run_id = $PreparationRunId; unsigned_archive_sha256 = $ExpectedPreparedArchiveSha256.ToLowerInvariant(); source_revision = $head.ToLowerInvariant() }
-        layout = @($expectedPayload | Sort-Object)
         features = $manifest.features
         mouse_mapper = $manifest.mouse_mapper
+        layout = $expectedPayload
         signing = [ordered]@{
             channel = 'msi-request-signing'
             signed_downstream = $signedDownstream
@@ -367,8 +326,6 @@ try {
         infverif_required = $true
         inf2cat_required = $true
         fresh_inf2cat_evidence = $true
-        exact_prepared_artifact_reused_without_rebuild = $true
-        mapper_kernel_policy_verified = $true
         package_verified_unsigned_for_msi_signing = $true
         unsigned_authenticode_checked = $true
         certificate_absent = $true

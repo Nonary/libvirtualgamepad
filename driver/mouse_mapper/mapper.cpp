@@ -34,8 +34,8 @@ constexpr auto &interface_id = lvg::mouse_mapper::k_interface_guid;
 constexpr GUID mapper_interface = {interface_id.data1,interface_id.data2,interface_id.data3,
   {interface_id.data4[0],interface_id.data4[1],interface_id.data4[2],interface_id.data4[3],
    interface_id.data4[4],interface_id.data4[5],interface_id.data4[6],interface_id.data4[7]}};
-static_assert(LVG_KM_VENDOR_ID > 0 && LVG_KM_VENDOR_ID <= 65535, "An explicitly owned vendor ID is required");
-static_assert(LVG_KM_PRODUCT_ID > 0 && LVG_KM_PRODUCT_ID <= 65535, "An explicitly owned product ID is required");
+static_assert(LVG_KM_VENDOR_ID >= 0 && LVG_KM_VENDOR_ID <= 65535, "Vendor ID must fit in 16 bits");
+static_assert(LVG_KM_PRODUCT_ID >= 0 && LVG_KM_PRODUCT_ID <= 65535, "Product ID must fit in 16 bits");
 constexpr GUID expected_container = {0x5d43cc5c,0x318a,0x46f4,{0x8a,0x8f,0x2d,0x1d,0x3c,0x99,0x80,0x21}};
 struct device_context {
   WDFDEVICE device;

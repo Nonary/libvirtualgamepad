@@ -110,6 +110,9 @@ struct CONNECT_DATA {object *ClassDeviceObject{};void *ClassService{};};using PC
 using PSERVICE_CALLBACK_ROUTINE=void(*)(object*,MOUSE_INPUT_DATA*,MOUSE_INPUT_DATA*,ULONG*);
 struct HID_COLLECTION_INFORMATION {ULONG DescriptorSize;std::uint16_t VendorID,ProductID,VersionNumber;};
 struct HIDP_CAPS {std::uint16_t UsagePage{},Usage{},InputReportByteLength{},OutputReportByteLength{};};
+inline HID_COLLECTION_INFORMATION native_collection_information {16,LVG_KM_VENDOR_ID,LVG_KM_PRODUCT_ID,0x100};
+inline HIDP_CAPS native_collection_caps {0xff53,1,22,8};
+inline GUID native_container {0x5d43cc5c,0x318a,0x46f4,{0x8a,0x8f,0x2d,0x1d,0x3c,0x99,0x80,0x21}};
 using PHIDP_PREPARSED_DATA=void*;
 #define WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(type,name) inline type *name(object *o) {return reinterpret_cast<type*>(o->storage.data());}
 #define WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(a,t) (*(a)={})
@@ -188,9 +191,9 @@ inline int WdfRequestGetRequestorMode(object*r){return r->mode;}
 inline NTSTATUS WdfRequestRetrieveOutputBuffer(object*r,size_t n,void**p,void*){if(r->size<n)return STATUS_BUFFER_TOO_SMALL;*p=r->buffer;return 0;}
 inline NTSTATUS WdfRequestRetrieveInputBuffer(object*r,size_t n,void**p,void*v){return WdfRequestRetrieveOutputBuffer(r,n,p,v);}
 inline void WdfRequestComplete(object*r,NTSTATUS s){r->status=s;}inline void WdfRequestCompleteWithInformation(object*r,NTSTATUS s,size_t n){r->status=s;r->information=n;}
-inline NTSTATUS WdfIoTargetSendIoctlSynchronously(object*,void*,unsigned code,void*,WDF_MEMORY_DESCRIPTOR*out,void*,void*){if(code==IOCTL_HID_GET_COLLECTION_INFORMATION)*static_cast<HID_COLLECTION_INFORMATION*>(out->data)={16,LVG_KM_VENDOR_ID,LVG_KM_PRODUCT_ID,0x100};return 0;}
-inline NTSTATUS HidP_GetCaps(void*,HIDP_CAPS*c){*c={0xff53,1,22,8};return HIDP_STATUS_SUCCESS;}
-inline NTSTATUS IoGetDevicePropertyData(object*,int*,unsigned,unsigned,size_t n,void*p,ULONG*required,DEVPROPTYPE*t){GUID c{0x5d43cc5c,0x318a,0x46f4,{0x8a,0x8f,0x2d,0x1d,0x3c,0x99,0x80,0x21}};assert(n==sizeof(c));std::memcpy(p,&c,n);*required=sizeof(c);*t=DEVPROP_TYPE_GUID;return 0;}
+inline NTSTATUS WdfIoTargetSendIoctlSynchronously(object*,void*,unsigned code,void*,WDF_MEMORY_DESCRIPTOR*out,void*,void*){if(code==IOCTL_HID_GET_COLLECTION_INFORMATION)*static_cast<HID_COLLECTION_INFORMATION*>(out->data)=native_collection_information;return 0;}
+inline NTSTATUS HidP_GetCaps(void*,HIDP_CAPS*c){*c=native_collection_caps;return HIDP_STATUS_SUCCESS;}
+inline NTSTATUS IoGetDevicePropertyData(object*,int*,unsigned,unsigned,size_t n,void*p,ULONG*required,DEVPROPTYPE*t){assert(n==sizeof(native_container));std::memcpy(p,&native_container,n);*required=sizeof(native_container);*t=DEVPROP_TYPE_GUID;return 0;}
 inline object *WdfIoQueueGetDevice(object*q){return q->parent;}
 inline NTSTATUS WdfIoQueueCreate(object*d,WDF_IO_QUEUE_CONFIG*c,void*,object**o){d->queue=make_object(d);d->queue->queue_config=*c;if(o)*o=d->queue;return 0;}
 inline PWDFDEVICE_INIT WdfPdoInitAllocate(object*p){return new device_init{p};}

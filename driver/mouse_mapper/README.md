@@ -2,10 +2,12 @@
 
 `VibeshineVhfMouseMapper.vcxproj` is a KMDF mouse port/mapper, built for x64
 or ARM64 using WDK 10.0.26100. It is the function driver for the producer's
-second HID collection. The INF matches only an explicitly configured, owned,
-nonzero VID/PID, revision 0100, collection 02. Build and packaging must receive
-the same `LvgKeyboardMouseVendorId` and `LvgKeyboardMouseProductId` values.
-The source does not assign or claim ownership of a USB vendor identifier.
+second HID collection. The INF matches the configured VID/PID, revision 0100,
+collection 02. VID and PID default to zero for this virtual VHF source; optional
+overrides accept decimal or hexadecimal values from 0 through 65535. Producer
+and mapper builds use the same `LvgKeyboardMouseVendorId` and
+`LvgKeyboardMouseProductId` values. The source does not assign or claim ownership
+of a USB vendor identifier.
 
 The mapper verifies HID collection attributes, usage FF53/0001, report length,
 and the dedicated VHF container before starting. MouseClass's kernel CREATE

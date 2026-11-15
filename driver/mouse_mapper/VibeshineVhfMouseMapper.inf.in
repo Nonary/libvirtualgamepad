@@ -1,8 +1,8 @@
 ; Copyright (c) 2026 Chase Payne
 ; SPDX-License-Identifier: MIT
-; Packager requires explicitly configured OWNED nonzero $VID$/$PID$. The
+; Packager defaults to virtual VHF $VID$/$PID$ (0/0); optional IDs are 16-bit. The
 ; producer must enumerate keyboard/mouse/consumer in that order (mouse Col02)
-; and VersionNumber 0x0100. Never match a generic usage or zero VID/PID here.
+; and VersionNumber 0x0100. Never replace this exact match with a generic usage.
 [Version]
 Signature="$Windows NT$"
 Class=Mouse

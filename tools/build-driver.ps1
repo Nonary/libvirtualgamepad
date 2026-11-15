@@ -11,7 +11,7 @@ param(
 
     [string] $PackageDir,
 
-    # Supply only nonzero IDs allocated to this product; no default is assumed.
+    # The existing virtual VHF identity defaults to 0/0; overrides are 16-bit values.
     [uint16] $KeyboardMouseVendorId = 0,
     [uint16] $KeyboardMouseProductId = 0,
 
@@ -30,9 +30,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($KeyboardMouseVendorId -eq 0 -or $KeyboardMouseProductId -eq 0) {
-    throw 'The ordered mouse mapper requires explicit nonzero product-owned -KeyboardMouseVendorId and -KeyboardMouseProductId. No production identity is allocated by this script.'
-}
 
 
 function Resolve-DriverVer {

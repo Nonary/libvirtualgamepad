@@ -193,8 +193,14 @@ not a configuration-only branding change.
 
 ## Device identity
 
-VHF leaves a HID child's VID/PID at zero unless the driver supplies them, which
-gives Windows and applications nothing to match on. pid.codes reserves
+The virtual keyboard/mouse source retains VHF's default VID/PID `0000:0000`.
+Its mapper matches the exact revision and collection, then verifies the vendor
+usage, dedicated container and direct status-child handshake. Optional numeric
+VID/PID overrides are shared by both components. This virtual mouse binding
+does not require a USB VID/PID allocation.
+
+The generic gamepad profiles have separate compatibility requirements.
+pid.codes reserves
 `1209:0001` for private testing only, so the public driver does not define,
 advertise, or create either generic profile with that identity. Their enum
 values remain reserved for protocol compatibility until this project receives

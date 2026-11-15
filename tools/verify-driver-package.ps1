@@ -41,6 +41,9 @@ param(
     [switch] $UnsignedForMsiSigning
 )
 
+if ($UnsignedForMsiSigning -and ($RequireKernelSigning -or -not [string]::IsNullOrWhiteSpace($KernelSignedMapperCatalog))) {
+    throw 'The unsigned producer release cannot import or require a signed mapper catalog. Future signed-package verification is a separate explicit mode.'
+}
 if ($UnsignedForMsiSigning -and $AllowLocalTestCertificate) {
     throw 'A package signed downstream cannot also be a local-test package.'
 }
@@ -116,7 +119,6 @@ $identityMatches = [regex]::Matches((Get-Content -LiteralPath $mapperInf -Raw), 
 if ($identityMatches.Count -ne 1) { throw 'Mapper INF must contain exactly one owned revision/collection identity.' }
 $mapperVendorId = [Convert]::ToUInt16($identityMatches[0].Groups[1].Value, 16)
 $mapperProductId = [Convert]::ToUInt16($identityMatches[0].Groups[2].Value, 16)
-if ($mapperVendorId -eq 0 -or $mapperProductId -eq 0) { throw 'Mapper INF identity must be numerically nonzero.' }
 
 $catalogMembership = $null
 if ($UnsignedForMsiSigning) {
@@ -172,7 +174,7 @@ if (-not $UnsignedForMsiSigning) {
 }
 # Importing a Microsoft-signed CAT never changes the catalog-bound INF/SYS.
 # Verify the replacement against those exact bytes before publishing hashes.
-$kernelSigning = 'requires-microsoft-signing'
+$kernelSigning = 'unsigned-producer'
 if (-not [string]::IsNullOrWhiteSpace($KernelSignedMapperCatalog)) {
     $signTool = Resolve-SignTool -ExplicitPath $SignToolPath
     foreach ($payload in @($mapperInf, $mapperSys)) {
@@ -268,7 +270,7 @@ if ($usesLocalTestCertificate -and $deviceSetupSignature.SignerCertificate.Thumb
 }
 
 if ($UnsignedForMsiSigning) {
-    if ($kernelSigning -ceq 'requires-microsoft-signing') {
+    if ($kernelSigning -ceq 'unsigned-producer') {
         Assert-UnsignedAuthenticode -Path $mapperCatalog
         Assert-UnsignedAuthenticode -Path $mapperSys
     }
@@ -339,6 +341,8 @@ $manifest = [ordered]@{
             unsigned_payloads = @(
                 'driver/VibeshineVhfGamepad.cat',
                 'driver/VibeshineVhfGamepad.dll',
+                'mouse_mapper/VibeshineVhfMouseMapper.cat',
+                'mouse_mapper/VibeshineVhfMouseMapper.sys',
                 'tools/VibeshineVhfGamepadDeviceSetup.exe'
             )
             catalog_membership = $catalogMembership

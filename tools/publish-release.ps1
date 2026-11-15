@@ -43,6 +43,39 @@ function Assert-ExactList {
     }
 }
 
+function Get-ValidatedMouseMapperMetadata {
+    param([Parameter(Mandatory = $true)]$Metadata, [string]$Context = 'Mouse mapper')
+    $property = $Metadata.PSObject.Properties['mouse_mapper']
+    if ($null -eq $property -or $null -eq $property.Value) { throw "$Context lacks mouse mapper metadata." }
+    $mapper = $property.Value
+    foreach ($name in @('transport_version', 'vendor_id', 'product_id', 'kernel_signing')) {
+        if ($null -eq $mapper.PSObject.Properties[$name]) { throw "$Context lacks mouse mapper field '$name'." }
+    }
+    $numbers = @{}
+    foreach ($name in @('transport_version', 'vendor_id', 'product_id')) {
+        [uint32]$number = 0
+        if (-not [uint32]::TryParse([string]$mapper.PSObject.Properties[$name].Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -or $number -gt 65535) {
+            throw "$Context mouse mapper '$name' must be an integer in 0..65535."
+        }
+        $numbers[$name] = $number
+    }
+    if ($numbers.transport_version -ne 1 -or [string]$mapper.kernel_signing -cne 'unsigned-producer') { throw "$Context has unsupported mouse mapper transport/signing metadata." }
+    return "1/$($numbers.vendor_id)/$($numbers.product_id)/unsigned-producer"
+}
+function Assert-MouseMapperMetadataMatch {
+    param([Parameter(Mandatory = $true)]$Expected, [Parameter(Mandatory = $true)]$Actual, [string]$Context = 'Release records')
+    if ((Get-ValidatedMouseMapperMetadata -Metadata $Expected -Context $Context) -cne (Get-ValidatedMouseMapperMetadata -Metadata $Actual -Context $Context)) {
+        throw "$Context mouse mapper metadata mismatch (transport, VID, PID or signing)."
+    }
+}
+function Assert-MouseMapperInfIdentity {
+    param([Parameter(Mandatory = $true)]$Metadata, [Parameter(Mandatory = $true)][string]$InfContents, [string]$Context = 'Mapper INF')
+    $null = Get-ValidatedMouseMapperMetadata -Metadata $Metadata -Context $Context
+    $ids = [regex]::Matches($InfContents, 'HID\\VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})&REV_0100&Col02')
+    if ($ids.Count -ne 1 -or [Convert]::ToUInt16($ids[0].Groups[1].Value, 16) -ne [uint16]$Metadata.mouse_mapper.vendor_id -or
+        [Convert]::ToUInt16($ids[0].Groups[2].Value, 16) -ne [uint16]$Metadata.mouse_mapper.product_id) { throw "$Context mouse mapper INF identity does not match its metadata." }
+}
+
 function Get-ResponseJson {
     param(
         [Parameter(Mandatory = $true)] $Response,
@@ -140,6 +173,8 @@ function Assert-ReleaseSet {
         'tools/VibeshineVhfGamepadDeviceSetup.exe'
     )
     $expectedUnsigned = @(
+        'mouse_mapper/VibeshineVhfMouseMapper.cat',
+        'mouse_mapper/VibeshineVhfMouseMapper.sys',
         'driver/VibeshineVhfGamepad.cat',
         'driver/VibeshineVhfGamepad.dll',
         'tools/VibeshineVhfGamepadDeviceSetup.exe'
@@ -153,9 +188,11 @@ function Assert-ReleaseSet {
         'driver/VibeshineVhfGamepad.inf'
     )
 
+    $expectedUnsigned = @($expectedUnsigned | Sort-Object)
     $expectedLayout = @($expectedLayout | Sort-Object)
     $expectedMembershipFiles = @($expectedMembershipFiles | Sort-Object)
     foreach ($record in @($lock, $evidence)) {
+        $null = Get-ValidatedMouseMapperMetadata -Metadata $record -Context 'Release sidecar'
         if ($record.schema_version -ne 1 -or
             $record.tag -cne $ExpectedTag -or
             $record.tag_target -cne $ExpectedRevision -or
@@ -163,12 +200,9 @@ function Assert-ReleaseSet {
             $record.driver_ver -notmatch '^\d{2}/\d{2}/\d{4},0\.1\.0\.\d+$' -or
             $record.protocol_version -lt 1 -or
             $record.platform -cne 'x64' -or
-            $record.preparation.run_id -notmatch '^[1-9][0-9]*$' -or
-            $record.preparation.unsigned_archive_sha256 -notmatch '^[0-9a-f]{64}$' -or
-            $record.preparation.source_revision -cne $ExpectedRevision -or
             $record.features.mouse_mapper -ne 1 -or
             $record.mouse_mapper.transport_version -ne 1 -or
-            $record.mouse_mapper.kernel_signing -cne 'windows-kernel-policy' -or
+            $record.mouse_mapper.kernel_signing -cne 'unsigned-producer' -or
             $record.archive.name -cne $ArchiveName -or
             $record.archive.sha256 -cne $archiveHash -or
             $record.manifest.path -cne 'manifest.json' -or
@@ -184,6 +218,7 @@ function Assert-ReleaseSet {
             throw 'A release lock or evidence record does not match the release contract.'
         }
     }
+    Assert-MouseMapperMetadataMatch -Expected $lock -Actual $evidence -Context 'Release lock/evidence'
     if ($lock.driver_ver -cne $evidence.driver_ver -or
         $lock.protocol_version -ne $evidence.protocol_version -or
         $lock.manifest.sha256 -cne $evidence.manifest.sha256 -or
@@ -192,8 +227,6 @@ function Assert-ReleaseSet {
         throw 'The release lock and evidence record disagree.'
     }
     if (-not $evidence.verification.clean_tagged_head -or
-        -not $evidence.verification.exact_prepared_artifact_reused_without_rebuild -or
-        -not $evidence.verification.mapper_kernel_policy_verified -or
         -not $evidence.verification.infverif_required -or
         -not $evidence.verification.inf2cat_required -or
         -not $evidence.verification.fresh_inf2cat_evidence -or
@@ -222,6 +255,10 @@ function Assert-ReleaseSet {
             $memory.Dispose()
             $stream.Dispose()
         }
+        $mapperInfEntry = $zip.GetEntry('mouse_mapper/VibeshineVhfMouseMapper.inf')
+        if ($null -eq $mapperInfEntry) { throw 'The ZIP lacks its mapper INF.' }
+        $infReader = [IO.StreamReader]::new($mapperInfEntry.Open(), $true)
+        try { $mapperInfContents = $infReader.ReadToEnd() } finally { $infReader.Dispose() }
     } finally {
         $zip.Dispose()
     }
@@ -238,6 +275,8 @@ function Assert-ReleaseSet {
         throw 'The archived manifest hash does not match the release lock.'
     }
     $manifest = [System.Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+    Assert-MouseMapperMetadataMatch -Expected $lock -Actual $manifest -Context 'Release lock/archived manifest'
+    Assert-MouseMapperInfIdentity -Metadata $manifest -InfContents $mapperInfContents -Context 'Archived mapper INF'
     if ($manifest.source_revision -cne $lock.source_revision -or
         $manifest.driver_ver -cne $lock.driver_ver -or
         $manifest.protocol_version -ne $lock.protocol_version -or

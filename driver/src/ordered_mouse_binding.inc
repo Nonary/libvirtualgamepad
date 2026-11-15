@@ -17,9 +17,9 @@
 
 [[nodiscard]] bool ordered_mouse_hardware_matches(DEVINST node) noexcept {
   // Do not accept a generic mouse, a vendor-page compatible ID, or a different
-  // revision/collection. The release packager supplies the same owned IDs to
-  // both producer and mapper. Zero development defaults can never bind.
-  if (LVG_KM_VENDOR_ID == 0 || LVG_KM_PRODUCT_ID == 0) return false;
+  // revision/collection. Producer and mapper use the same configured values,
+  // including the virtual source's default VID/PID 0000:0000. Exact container
+  // and direct status-child checks below distinguish this endpoint.
   wchar_t expected[80] {};
   const int length = swprintf_s(expected, _countof(expected),
     L"HID\\VID_%04X&PID_%04X&REV_%04X&Col02",
@@ -124,7 +124,6 @@
 }
 
 [[nodiscard]] bool wait_for_ordered_mouse_mapper(const GUID &container_id, DWORD timeout_ms) noexcept {
-  if (LVG_KM_VENDOR_ID == 0 || LVG_KM_PRODUCT_ID == 0) return false;
   // PnP startup is asynchronous. Bound retries without inferring readiness
   // from capability flags or observing cursor/global button state.
   const ULONGLONG started = GetTickCount64();

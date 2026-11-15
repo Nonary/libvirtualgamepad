@@ -68,12 +68,8 @@ jobs:
           ctest --test-dir $mapperBuild -C Debug --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { throw 'Mapper core tests failed.' }
       - name: Build and verify the unsigned driver package with the WDK
-        env:
-          VHF_MOUSE_VENDOR_ID: ${{ vars.VHF_MOUSE_VENDOR_ID }}
-          VHF_MOUSE_PRODUCT_ID: ${{ vars.VHF_MOUSE_PRODUCT_ID }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not $env:VHF_MOUSE_VENDOR_ID -or -not $env:VHF_MOUSE_PRODUCT_ID) { throw 'Configure product-owned VHF_MOUSE_VENDOR_ID and VHF_MOUSE_PRODUCT_ID repository variables before building the mapper.' }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $instance = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($instance)) { throw 'No MSBuild instance found.' }
@@ -87,7 +83,6 @@ jobs:
           $evidence = Join-Path $env:RUNNER_TEMP 'vhf-pr-catalog.json'
           ./tools/build-driver.ps1 -Configuration Release -Platform x64 -DriverVer $driverVer `
             -PackageDir $package -SigningMode Release -MSBuildPath $msbuild `
-            -KeyboardMouseVendorId ([uint16]$env:VHF_MOUSE_VENDOR_ID) -KeyboardMouseProductId ([uint16]$env:VHF_MOUSE_PRODUCT_ID) `
             -CatalogGenerationEvidencePath $evidence
           ./tools/verify-driver-package.ps1 -PackageDir $package -Platform x64 `
             -DriverVer $driverVer -SourceRevision $source -UnsignedForMsiSigning `

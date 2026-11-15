@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Chase Payne
 // SPDX-License-Identifier: MIT
 // Compile the shipping CM/interface/status discovery body against inert APIs.
-// These synthetic identifiers are fixtures, never accepted production IDs.
+// The default fixture exercises the virtual source's VID/PID 0000:0000.
+// A second build exercises numeric overrides against the same discovery body.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -29,19 +30,29 @@ constexpr ULONG CM_GET_DEVICE_INTERFACE_LIST_PRESENT=0, CM_LOCATE_DEVNODE_NORMAL
 constexpr int DEVPKEY_Device_ContainerId=1, DEVPKEY_Device_HardwareIds=2;
 constexpr DEVPROPTYPE DEVPROP_TYPE_GUID=1, DEVPROP_TYPE_STRING_LIST=2;
 constexpr DWORD GENERIC_READ=0x80000000, FILE_SHARE_READ=1, FILE_SHARE_WRITE=2, OPEN_EXISTING=3;
-#define LVG_KM_VENDOR_ID 65535
-#define LVG_KM_PRODUCT_ID 65534
+#ifndef LVG_KM_VENDOR_ID
+#define LVG_KM_VENDOR_ID 0
+#endif
+#ifndef LVG_KM_PRODUCT_ID
+#define LVG_KM_PRODUCT_ID 0
+#endif
 #define _countof(x) (sizeof(x)/sizeof((x)[0]))
 #define INVALID_HANDLE_VALUE reinterpret_cast<HANDLE>(std::intptr_t{-1})
 namespace {
 int checks=0,failures=0;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::fprintf(stderr,"%d: %s\n",__LINE__,#x); } } while(false)
 namespace mapper = lvg::mouse_mapper;
+std::wstring hardware_id(unsigned vendor=LVG_KM_VENDOR_ID, unsigned product=LVG_KM_PRODUCT_ID,
+    unsigned revision=0x0100, unsigned collection=2) {
+  wchar_t id[80] {};
+  std::swprintf(id,_countof(id),L"HID\\VID_%04X&PID_%04X&REV_%04X&Col%02X",vendor,product,revision,collection);
+  return id;
+}
 struct node {
   std::wstring id=L"HID\\Fixture\\One";
   GUID container=mapper::k_container_guid;
   GUID child_container=mapper::k_container_guid;
-  std::wstring hardware=L"HID\\VID_FFFF&PID_FFFE&REV_0100&Col02";
+  std::wstring hardware=hardware_id();
   mapper::status status {sizeof(mapper::status), mapper::k_status_version,0,mapper::k_ready,mapper::k_container_guid};
   DWORD received=sizeof(mapper::status);
   ULONGLONG ready_at=0;
@@ -135,14 +146,17 @@ void reset() {nodes={node{}};ticks=0;opens=queries=closes=0;bad_list=false;}
 bool bind(DWORD timeout=0) {return wait_for_ordered_mouse_mapper(mapper::k_container_guid,timeout);}
 }
 int main() {
+  if constexpr (LVG_KM_VENDOR_ID==0 && LVG_KM_PRODUCT_ID==0)
+    CHECK(hardware_id()==L"HID\\VID_0000&PID_0000&REV_0100&Col02");
   reset();CHECK(bind());CHECK(opens==1 && queries==1 && closes==1);
-  reset();nodes[0].hardware=L"hid\\vid_ffff&pid_fffe&rev_0100&col02";CHECK(bind());
+  reset();std::transform(nodes[0].hardware.begin(),nodes[0].hardware.end(),nodes[0].hardware.begin(),[](wchar_t c){return std::towlower(c);});CHECK(bind());
   reset();nodes.clear();CHECK(!bind(25));CHECK(ticks==25 && opens==0);
   reset();nodes[0].container.data4[7]^=1;CHECK(!bind());CHECK(opens==0);
-  reset();nodes[0].hardware=L"HID\\VID_FFFF&PID_FFFE&REV_0100&Col01";CHECK(!bind());CHECK(opens==0);
-  reset();nodes[0].hardware=L"HID\\VID_FFFF&PID_FFFE&REV_0001&Col02";CHECK(!bind());
+  reset();nodes[0].hardware=hardware_id(LVG_KM_VENDOR_ID,LVG_KM_PRODUCT_ID,0x0100,1);CHECK(!bind());CHECK(opens==0);
+  reset();nodes[0].hardware=hardware_id(LVG_KM_VENDOR_ID,LVG_KM_PRODUCT_ID,1);CHECK(!bind());
   reset();nodes[0].hardware=L"HID_DEVICE_UP:FF53_U:0001";CHECK(!bind());
-  reset();nodes[0].hardware=L"HID\\VID_FFFF&PID_FFFD&REV_0100&Col02";CHECK(!bind());
+  reset();nodes[0].hardware=hardware_id(LVG_KM_VENDOR_ID,LVG_KM_PRODUCT_ID^1);CHECK(!bind());
+  reset();nodes[0].hardware=hardware_id(LVG_KM_VENDOR_ID^1,LVG_KM_PRODUCT_ID);CHECK(!bind());
   reset();nodes[0].property=false;CHECK(!bind());
   reset();nodes[0].child=false;CHECK(!bind());CHECK(opens==0);
   reset();nodes[0].child_container.data1++;CHECK(!bind());CHECK(opens==0);

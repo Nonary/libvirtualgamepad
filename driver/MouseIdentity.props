@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!-- Both projects validate and normalize the same joint-build inputs. This
-       proves numeric identity consistency for build-driver/package workflows;
-       it does not establish an allocation or correlate unrelated manual builds. -->
-  <Target Name="ValidateOwnedMouseIdentity" BeforeTargets="ClCompile">
-    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(LvgKeyboardMouseVendorId)', '^(0[xX][0-9a-fA-F]{1,4}|[0-9]{1,5})$'))" Text="Set LvgKeyboardMouseVendorId to an explicitly owned nonzero 16-bit decimal or hexadecimal identity." />
-    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(LvgKeyboardMouseProductId)', '^(0[xX][0-9a-fA-F]{1,4}|[0-9]{1,5})$'))" Text="Set LvgKeyboardMouseProductId to an explicitly owned nonzero 16-bit decimal or hexadecimal identity." />
+  <!-- Both virtual-source projects retain VHF's zero VID/PID defaults and
+       normalize optional overrides identically for joint builds. -->
+  <PropertyGroup>
+    <LvgKeyboardMouseVendorId Condition="'$(LvgKeyboardMouseVendorId)' == ''">0</LvgKeyboardMouseVendorId>
+    <LvgKeyboardMouseProductId Condition="'$(LvgKeyboardMouseProductId)' == ''">0</LvgKeyboardMouseProductId>
+  </PropertyGroup>
+  <Target Name="ValidateMouseIdentity" BeforeTargets="ClCompile">
+    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(LvgKeyboardMouseVendorId)', '^(0[xX][0-9a-fA-F]{1,4}|[0-9]{1,5})$'))" Text="LvgKeyboardMouseVendorId must be a 16-bit decimal or hexadecimal value from 0 through 65535." />
+    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(LvgKeyboardMouseProductId)', '^(0[xX][0-9a-fA-F]{1,4}|[0-9]{1,5})$'))" Text="LvgKeyboardMouseProductId must be a 16-bit decimal or hexadecimal value from 0 through 65535." />
     <PropertyGroup>
       <_LvgVendorBase Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(LvgKeyboardMouseVendorId)', '^0[xX]'))">16</_LvgVendorBase>
       <_LvgVendorBase Condition="'$(_LvgVendorBase)' == ''">10</_LvgVendorBase>
@@ -14,7 +17,7 @@
       <_LvgVendorId>$([System.Convert]::ToUInt32('$(LvgKeyboardMouseVendorId)', $(_LvgVendorBase)))</_LvgVendorId>
       <_LvgProductId>$([System.Convert]::ToUInt32('$(LvgKeyboardMouseProductId)', $(_LvgProductBase)))</_LvgProductId>
     </PropertyGroup>
-    <Error Condition="'$(_LvgVendorId)' == '0' Or $(_LvgVendorId) &gt; 65535 Or '$(_LvgProductId)' == '0' Or $(_LvgProductId) &gt; 65535" Text="Both owned mouse identities must be numerically nonzero and at most 65535; hexadecimal zero is not valid." />
+    <Error Condition="$(_LvgVendorId) &gt; 65535 Or $(_LvgProductId) &gt; 65535" Text="Both mouse identity values must be from 0 through 65535." />
     <ItemGroup>
       <ClCompile>
         <PreprocessorDefinitions>LVG_KM_VENDOR_ID=$(_LvgVendorId);LVG_KM_PRODUCT_ID=$(_LvgProductId);%(ClCompile.PreprocessorDefinitions)</PreprocessorDefinitions>

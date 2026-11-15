@@ -1,8 +1,12 @@
 // Copyright (c) 2026 Chase Payne
 // SPDX-License-Identifier: MIT
 #define LVG_MOUSE_MAPPER_TEST 1
-#define LVG_KM_VENDOR_ID 65535
-#define LVG_KM_PRODUCT_ID 65534
+#ifndef LVG_KM_VENDOR_ID
+#define LVG_KM_VENDOR_ID 0
+#endif
+#ifndef LVG_KM_PRODUCT_ID
+#define LVG_KM_PRODUCT_ID 0
+#endif
 #include "mapper.cpp"
 #include <cstdlib>
 #include <iostream>
@@ -66,6 +70,31 @@ struct fixture {
 };
 static lvg::mouse_transport::report report_for(std::uint32_t s) {return {2,1,0,0,0,0,0,0,0,s};}
 int main() {
+ {
+  // Query the actual mapper admission body with the configured identity,
+  // including its default zero VID/PID, then reject individual mismatches.
+  fixture f(false);
+  CHECK(query_collection(f.c)==STATUS_SUCCESS);
+  native_collection_information.VendorID^=1;
+  CHECK(query_collection(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_collection_information.VendorID^=1;
+  native_collection_information.ProductID^=1;
+  CHECK(query_collection(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_collection_information.ProductID^=1;
+  native_collection_information.VersionNumber^=1;
+  CHECK(query_collection(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_collection_information.VersionNumber^=1;
+  native_collection_caps.UsagePage^=1;
+  CHECK(query_collection(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_collection_caps.UsagePage^=1;
+  native_collection_caps.Usage^=1;
+  CHECK(query_collection(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_collection_caps.Usage^=1;
+  native_container.Data1^=1;
+  CHECK(validate_container(f.c)==STATUS_DEVICE_CONFIGURATION_ERROR);
+  native_container.Data1^=1;
+  CHECK(validate_container(f.c)==STATUS_SUCCESS);
+ }
  {
   fixture f(false,false);
   CHECK(native_reads==0);CHECK(!f.c->active);CHECK(f.c->power_on);
