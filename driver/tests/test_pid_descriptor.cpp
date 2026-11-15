@@ -2344,6 +2344,33 @@ int main() {
           "ds5 vibration-v2 can stop the motors");
   }
 
+  {
+    ds5_output_report output {};
+    output.report_id = k_ds5_output_report_id;
+    output.valid_flag0 = k_ds5_flag0_compatible_vibration;
+    output.motor_left = 0x80;
+    output.motor_right = 0x40;
+    playstation_output_feedback feedback {};
+    check(apply_ds5_output(output, &feedback), "ds5 flagged rumble applies");
+    check(feedback.low_frequency == 0x8000 && feedback.high_frequency == 0x4000,
+          "ds5 flagged rumble sets the motors");
+
+    ds5_output_report lightbar {};
+    lightbar.report_id = k_ds5_output_report_id;
+    lightbar.valid_flag1 = k_ds5_flag1_lightbar;
+    lightbar.lightbar_red = 0x10;
+    check(apply_ds5_output(lightbar, &feedback), "ds5 lightbar-only report applies");
+    check(feedback.low_frequency == 0x8000 && feedback.high_frequency == 0x4000,
+          "ds5 report with other flags and zero motor bytes keeps the motors");
+
+    ds5_output_report stop {};
+    stop.report_id = k_ds5_output_report_id;
+    check(apply_ds5_output(stop, &feedback), "ds5 unflagged stop report applies");
+    check(feedback.low_frequency == 0 && feedback.high_frequency == 0,
+          "ds5 unflagged report with zero motors stops the rumble");
+    check(feedback.red == 0x10, "ds5 unflagged stop leaves the lightbar alone");
+  }
+
   if (g_failures == 0) {
     std::printf("all PID descriptor and engine checks passed\n");
     return 0;
