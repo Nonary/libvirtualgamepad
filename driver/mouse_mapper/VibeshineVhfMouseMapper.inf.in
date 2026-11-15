@@ -25,15 +25,15 @@ CopyFiles=Mapper.CopyFiles
 AddReg=Mapper.Hardware
 
 [Mapper.Hardware]
-; Device-specific upper filter only. No Mouse-class/global filter changes.
+; Reference the Windows-provided mouse class service on this device only.
+; Windows owns its service installation and binary; this package does not
+; redeclare, replace, or copy mouclass.sys. No global class-filter changes.
 HKR,,UpperFilters,0x00010000,"mouclass"
 ; Read-only readiness interface. No user-mode raw-read/injection surface.
 HKR,,Security,,"D:P(A;;GR;;;SY)(A;;GR;;;BA)(A;;GR;;;LS)"
 
 [Mapper.NT.Services]
 AddService=VibeshineVhfMouseMapper,0x00000002,Mapper.Service
-; Use the inbox class service; preserve every existing service setting.
-AddService=mouclass,0x000000F8,MouseClass.Service
 
 [Mapper.Service]
 DisplayName=%ServiceName%
@@ -42,14 +42,6 @@ StartType=3
 ErrorControl=1
 ServiceBinary=%13%\VibeshineVhfMouseMapper.sys
 LoadOrderGroup=Pointer Port
-
-[MouseClass.Service]
-DisplayName=%MouseClassName%
-ServiceType=1
-StartType=3
-ErrorControl=1
-ServiceBinary=%12%\mouclass.sys
-LoadOrderGroup=Pointer Class
 
 [Mapper.NT.Wdf]
 KmdfService=VibeshineVhfMouseMapper,Mapper.Wdf
@@ -73,5 +65,4 @@ VibeshineVhfMouseMapper.sys=1
 Provider="Vibeshine"
 DeviceName="Vibeshine Ordered Virtual Mouse"
 ServiceName="Vibeshine VHF Ordered Mouse Mapper"
-MouseClassName="Mouse Class Driver"
 DiskName="Vibeshine Ordered Mouse Driver"
