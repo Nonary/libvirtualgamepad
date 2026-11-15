@@ -55,7 +55,7 @@ struct device_context {
   WDFREQUEST ack_request;
   WDFMEMORY ack_memory;
   lvg::mouse_transport::ack_report ack;
-  std::uint32_t delivering_sequence;
+  lvg::mouse_transport::uint32_t delivering_sequence;
   NTSTATUS ack_status;
   bool ack_pending;
   bool ack_completed;

@@ -12,6 +12,14 @@
 #include <iostream>
 #include <future>
 #include <thread>
+#include <type_traits>
+static_assert(std::is_same_v<lvg::mouse_transport::uint8_t, std::uint8_t>);
+static_assert(std::is_same_v<lvg::mouse_transport::uint16_t, std::uint16_t>);
+static_assert(std::is_same_v<lvg::mouse_transport::int16_t, std::int16_t>);
+static_assert(std::is_same_v<lvg::mouse_transport::uint32_t, std::uint32_t>);
+static_assert(std::is_same_v<lvg::mouse_transport::int32_t, std::int32_t>);
+static_assert(std::is_same_v<lvg::mouse_mapper::uint32_t, std::uint32_t>);
+static_assert(std::is_same_v<lvg::mouse_mapper::size_type, std::size_t>);
 #define CHECK(x) do { if (!(x)) { std::cerr << __LINE__ << ": " #x "\n"; std::abort(); } } while (0)
 static unsigned allowance=3;
 static std::vector<MOUSE_INPUT_DATA> delivered;
